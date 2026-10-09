@@ -1,0 +1,32 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Function to check if a user is signed in
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    // Function to check if the user is the owner
+    function isOwner(ownerId) {
+      return isSignedIn() && request.auth.uid == ownerId;
+    }
+
+    match /workflows/{workflowId} {
+      // Owner can read, update, delete
+      allow read, update, delete: if isOwner(resource.data.ownerId);
+      
+      // Anyone signed in can create, but ownerId must match their uid
+      allow create: if isSignedIn() && request.resource.data.ownerId == request.auth.uid;
+      
+      // Allow read if the workflow is explicitly shared (for future sharing logic)
+      // Example: allow read: if isSignedIn() && resource.data.isShared == true;
+    }
+    
+    // Explicitly deny everything else
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
