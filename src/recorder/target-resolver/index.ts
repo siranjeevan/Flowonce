@@ -22,10 +22,16 @@ export function extractTargetInfo(el: Element): TargetDescriptor {
   const placeholder = el.getAttribute('placeholder');
   if (placeholder) descriptor.placeholder = placeholder;
   
-  // Basic text content (trim and limit length)
-  const text = el.textContent?.trim();
-  if (text && text.length > 0 && text.length < 100) {
-    descriptor.text = text;
+  const href = el.getAttribute('href');
+  if (href) descriptor.href = href;
+  
+  const src = el.getAttribute('src');
+  if (src) descriptor.src = src;
+  
+  // Basic text content (trim and normalize whitespace)
+  const text = el.textContent?.replace(/\s+/g, ' ')?.trim();
+  if (text && text.length > 0) {
+    descriptor.text = text.substring(0, 60);
   }
   
   descriptor.selector = generateCssSelector(el);
@@ -58,8 +64,12 @@ function generateCssSelector(el: Element): string {
     
     // 1. Check for ID
     if (current.id) {
-      parts.unshift(`#${current.id}`);
-      break; 
+      // Avoid highly dynamic IDs (those with numbers or too long)
+      const isDynamic = /\\d/.test(current.id) || current.id.length > 30;
+      if (!isDynamic) {
+        parts.unshift(`#${current.id}`);
+        break; 
+      }
     }
     
     // 2. Check for common testing attributes
@@ -70,35 +80,32 @@ function generateCssSelector(el: Element): string {
     }
     
     // 3. Try to use stable classes
-    let hasValidClass = false;
     if (current.className && typeof current.className === 'string') {
-      const classes = current.className.split(/\s+/).filter(c => 
+      const classes = current.className.split(/\\s+/).filter(c => 
         c.length > 0 && 
         !c.includes(':') && // Ignore tailwind pseudo-selectors
         !c.match(/^[a-zA-Z0-9_-]{1,3}$/) && // Ignore minified classes like 'a', 'b', 'xyz'
-        !c.match(/\d+/) // Ignore classes with numbers (often dynamically generated like css-1x2y)
+        !c.match(/\\d+/) && // Ignore classes with numbers (often dynamically generated like css-1x2y)
+        !c.startsWith('sc-') && // Ignore styled-components
+        !c.startsWith('css-') // Ignore emotion
       );
       
       if (classes.length > 0) {
         selector += `.${classes.join('.')}`;
-        hasValidClass = true;
       }
     }
     
-    // 4. Fallback to nth-of-type if no useful classes exist, OR to ensure uniqueness among siblings
-    if (!hasValidClass) {
-      let sibling = current.previousElementSibling;
-      let nth = 1;
-      while (sibling) {
-        if (sibling.tagName.toLowerCase() === current.tagName.toLowerCase()) {
-          nth++;
-        }
-        sibling = sibling.previousElementSibling;
+    // 4. Calculate exact index among same-tag siblings to guarantee uniqueness
+    let sibling = current.previousElementSibling;
+    let nth = 1;
+    while (sibling) {
+      if (sibling.tagName.toLowerCase() === current.tagName.toLowerCase()) {
+        nth++;
       }
-      if (nth > 1) {
-        selector += `:nth-of-type(${nth})`;
-      }
+      sibling = sibling.previousElementSibling;
     }
+    // Always append nth-of-type to avoid ambiguity (unless we already stopped at a unique ID/testAttr)
+    selector += `:nth-of-type(${nth})`;
     
     parts.unshift(selector);
     current = current.parentElement;

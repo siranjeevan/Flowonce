@@ -32,6 +32,8 @@ export interface TargetDescriptor {
   ariaLabel?: string | null;
   text?: string | null;
   placeholder?: string | null;
+  href?: string | null;
+  src?: string | null;
   tag?: string;
   selector?: string;
   relativePosition?: Position;

@@ -109,4 +109,47 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     })();
     return true; // async
   }
+  else if (message.type === 'SAVE_WORKFLOW_FROM_CONTENT') {
+    (async () => {
+      try {
+        const data = await chrome.storage.local.get(['currentSteps']);
+        const currentSteps = (data.currentSteps as WorkflowStep[]) || [];
+        if (currentSteps.length === 0) {
+          sendResponse({ success: false, error: 'No steps to save' });
+          return;
+        }
+        
+        const workflow = {
+          id: `WF_${Date.now().toString(36).toUpperCase()}`,
+          name: message.payload.name || `Workflow ${new Date().toLocaleString()}`,
+          description: 'Recorded workflow',
+          ownerId: 'local_user',
+          version: 1,
+          schemaVersion: 1,
+          steps: [...currentSteps],
+          variables: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        
+        const storageData = await chrome.storage.local.get(['workflows']);
+        const workflows = (storageData.workflows as any[]) || [];
+        workflows.push(workflow);
+        await chrome.storage.local.set({ workflows, currentSteps: [], isRecording: false });
+        
+        // Exit fullscreen when recording stops via the overlay button
+        chrome.windows.getCurrent((window) => {
+          if (window.id && window.state === 'fullscreen') {
+            chrome.windows.update(window.id, { state: 'maximized' });
+          }
+        });
+        
+        sendResponse({ success: true });
+      } catch (err: any) {
+        console.error("Failed to save workflow:", err);
+        sendResponse({ success: false, error: err.message || 'Unknown error' });
+      }
+    })();
+    return true; // async
+  }
 });

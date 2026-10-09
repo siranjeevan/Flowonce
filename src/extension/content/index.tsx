@@ -64,12 +64,92 @@ function showRecordingIndicator() {
       (stopBtn as HTMLElement).style.background = 'rgba(255, 77, 79, 0.15)';
     });
     stopBtn.addEventListener('click', () => {
-      chrome.runtime.sendMessage({ type: 'STOP_AND_SAVE_RECORDING' });
       recorder?.stop();
       removeRecordingIndicator();
-      alert("✅ Recording stopped!\n\nPlease open the FlowOnce extension popup in the top right to save your workflow.");
+      showSaveModal();
     });
   }
+}
+
+function showSaveModal() {
+  const modalEl = document.createElement('div');
+  modalEl.id = 'flowonce-save-modal';
+  
+  // Overlay background
+  Object.assign(modalEl.style, {
+    position: 'fixed', top: '0', left: '0', width: '100vw', height: '100vh',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    zIndex: '2147483647', fontFamily: "'Inter', system-ui, sans-serif"
+  });
+
+  const modalContent = document.createElement('div');
+  Object.assign(modalContent.style, {
+    backgroundColor: '#263056', padding: '32px', borderRadius: '16px',
+    width: '400px', maxWidth: '90%', boxShadow: '0 24px 48px rgba(0,0,0,0.5)',
+    border: '1px solid rgba(249, 223, 159, 0.2)', display: 'flex', flexDirection: 'column', gap: '16px'
+  });
+
+  modalContent.innerHTML = `
+    <h2 style="margin: 0; color: #F9DF9F; font-size: 20px; font-weight: 700;">Save Workflow</h2>
+    <p style="margin: 0; color: #CDE4E6; opacity: 0.8; font-size: 14px;">Give your new automation a name.</p>
+    <input type="text" id="flowonce-workflow-name" placeholder="E.g., Meesho Order Placement" style="
+      background: #1A2240; border: 1px solid rgba(205, 228, 230, 0.2); border-radius: 8px;
+      padding: 12px 16px; color: #CDE4E6; font-size: 14px; outline: none; margin-top: 8px; width: 100%; box-sizing: border-box;
+    ">
+    <div style="display: flex; gap: 12px; margin-top: 16px;">
+      <button id="flowonce-cancel-btn" style="flex: 1; padding: 12px; border-radius: 8px; background: transparent; border: 1px solid rgba(205, 228, 230, 0.2); color: #CDE4E6; cursor: pointer; font-weight: 600;">Discard</button>
+      <button id="flowonce-save-btn" style="flex: 2; padding: 12px; border-radius: 8px; background: #F9DF9F; border: none; color: #263056; cursor: pointer; font-weight: 700; box-shadow: 0 4px 12px rgba(249, 223, 159, 0.2);">Save Workflow</button>
+    </div>
+  `;
+
+  modalEl.appendChild(modalContent);
+  document.body.appendChild(modalEl);
+
+  const inputEl = document.getElementById('flowonce-workflow-name') as HTMLInputElement;
+  inputEl?.focus();
+
+  inputEl?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      document.getElementById('flowonce-save-btn')?.click();
+    }
+  });
+
+  document.getElementById('flowonce-cancel-btn')?.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'STOP_AND_SAVE_RECORDING' }); // Just stop it without saving
+    document.body.removeChild(modalEl);
+  });
+
+  document.getElementById('flowonce-save-btn')?.addEventListener('click', () => {
+    const name = inputEl?.value.trim() || undefined;
+    
+    // Animate save button
+    const saveBtn = document.getElementById('flowonce-save-btn');
+    if (saveBtn) {
+      saveBtn.innerText = 'Saving...';
+      saveBtn.style.opacity = '0.8';
+      saveBtn.style.pointerEvents = 'none';
+    }
+
+    chrome.runtime.sendMessage({ 
+      type: 'SAVE_WORKFLOW_FROM_CONTENT',
+      payload: { name }
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+         console.error(chrome.runtime.lastError);
+         alert("❌ Extension connection error. Please refresh the page and try again.");
+         if (modalEl.parentNode) document.body.removeChild(modalEl);
+         return;
+      }
+      if (modalEl.parentNode) document.body.removeChild(modalEl);
+      if (response && response.success) {
+        alert("✅ Workflow Saved Successfully!\n\nYou can view and run it from the FlowOnce extension popup.");
+      } else {
+        alert("❌ Failed to save workflow: " + (response?.error || 'Unknown error'));
+      }
+    });
+  });
 }
 
 function removeRecordingIndicator() {

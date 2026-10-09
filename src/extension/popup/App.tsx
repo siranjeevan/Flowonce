@@ -49,6 +49,37 @@ function App() {
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
 
+  useEffect(() => {
+    if (!user) return;
+    
+    // Sync workflows saved locally from the content script modal up to the cloud
+    const syncLocalWorkflows = async () => {
+      try {
+        const data = await chrome.storage.local.get(['workflows']);
+        const localWorkflows = (data.workflows as Workflow[]) || [];
+        
+        if (localWorkflows.length > 0) {
+          console.log(`Syncing ${localWorkflows.length} local workflows to cloud...`);
+          for (const wf of localWorkflows) {
+            // Ensure ownerId is set to the real user before uploading
+            const cloudWf = { ...wf, ownerId: user.uid };
+            await FirestoreStorageManager.saveWorkflow(cloudWf);
+          }
+          // Clear the local workflows array after successful sync
+          await chrome.storage.local.set({ workflows: [] });
+          showNotification(`Synced ${localWorkflows.length} offline workflow(s) to cloud!`, 'success');
+          
+          // If we are on the workflows tab, we should reload it. 
+          // We can just trust the WorkflowsList component to fetch them since it mounts/updates.
+        }
+      } catch (err) {
+        console.error("Failed to sync local workflows to cloud:", err);
+      }
+    };
+    
+    syncLocalWorkflows();
+  }, [user]);
+
   const toggleRecording = async () => {
     const newState = !isRecording;
     

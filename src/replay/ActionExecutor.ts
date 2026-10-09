@@ -132,22 +132,41 @@ export class ActionExecutor {
   private static async executeScroll(el: HTMLElement, position?: any, speedMultiplier: number = 1): Promise<boolean> {
     if (!position || (position.scrollX === undefined && position.scrollY === undefined)) return false;
     
-    // If it's the document/html/body, scroll the window
-    if (el === document.documentElement || el === document.body) {
-      window.scrollTo({
-        left: position.scrollX || 0,
-        top: position.scrollY || 0,
-        behavior: 'auto'
-      });
+    // Always attempt window scroll
+    window.scrollTo({
+      left: position.scrollX || 0,
+      top: position.scrollY || 0,
+      behavior: 'auto'
+    });
+
+    // Also attempt to scroll the specific element
+    if (el && el !== document.documentElement && el !== document.body) {
+      try {
+        el.scrollTo({
+          left: position.scrollX || 0,
+          top: position.scrollY || 0,
+          behavior: 'auto'
+        });
+        el.scrollLeft = position.scrollX || 0;
+        el.scrollTop = position.scrollY || 0;
+      } catch (e) {}
     } else {
-      el.scrollTo({
-        left: position.scrollX || 0,
-        top: position.scrollY || 0,
-        behavior: 'auto'
+      // If we fell back to window (or the target was window), let's ALSO scroll any major scrollable container
+      // This fixes virtualization issues on SPAs (like Meesho) where the main body isn't the true scroll container
+      const scrollables = Array.from(document.querySelectorAll('*')).filter(e => {
+        if (e === document.documentElement || e === document.body) return false;
+        const style = window.getComputedStyle(e);
+        return (style.overflowY === 'auto' || style.overflowY === 'scroll') && e.scrollHeight > e.clientHeight;
       });
-      // Fallback for some custom scroll containers
-      el.scrollLeft = position.scrollX || 0;
-      el.scrollTop = position.scrollY || 0;
+      
+      // Sort by size (largest scrollable areas first)
+      scrollables.sort((a, b) => (b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight));
+      
+      // Apply the scroll to the top 3 largest scrollable areas
+      scrollables.slice(0, 3).forEach(s => {
+        s.scrollLeft = position.scrollX || 0;
+        s.scrollTop = position.scrollY || 0;
+      });
     }
 
     // Wait for scroll to settle
