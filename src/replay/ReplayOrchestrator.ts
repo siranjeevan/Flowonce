@@ -4,6 +4,7 @@ export class ReplayOrchestrator {
   private workflow: Workflow | null = null;
   private currentStepIndex = 0;
   private isRunning = false;
+  private isPaused = false;
   private variables: Record<string, string> = {};
   private speedMultiplier = 1;
 
@@ -18,13 +19,32 @@ export class ReplayOrchestrator {
 
   public stop() {
     this.isRunning = false;
+    this.isPaused = false;
+  }
+
+  public pause() {
+    this.isPaused = true;
+  }
+
+  public resume() {
+    if (!this.isRunning) return;
+    this.isPaused = false;
+    this.executeNextStep();
   }
 
   private async executeNextStep() {
     if (!this.isRunning || !this.workflow || this.currentStepIndex >= this.workflow.steps.length) {
+      console.log("Replay finished or stopped", { isRunning: this.isRunning, currentStepIndex: this.currentStepIndex });
       this.isRunning = false;
       chrome.runtime.sendMessage({ type: 'REPLAY_FINISHED', workflowId: this.workflow?.id }).catch(() => {});
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
+        if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: 'HIDE_REPLAY_INDICATOR' }).catch(() => {});
+      });
       return;
+    }
+
+    if (this.isPaused) {
+      return; // Wait for resume()
     }
 
     const step = this.workflow.steps[this.currentStepIndex];
@@ -39,7 +59,7 @@ export class ReplayOrchestrator {
     }).catch(() => {});
 
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       if (!tab || !tab.id) throw new Error("No active tab found");
 
       if (tab.url && preparedStep.url && new URL(tab.url).origin !== new URL(preparedStep.url).origin) {
@@ -49,11 +69,18 @@ export class ReplayOrchestrator {
         await new Promise(r => setTimeout(r, loadDelay));
       }
 
+      console.log("Sending EXECUTE_STEP to tab", tab.id, preparedStep);
       // Ask content script to execute step
       const result = await chrome.tabs.sendMessage(tab.id, { 
         type: 'EXECUTE_STEP', 
-        payload: { step: preparedStep, speedMultiplier: this.speedMultiplier }
+        payload: { 
+          step: preparedStep, 
+          speedMultiplier: this.speedMultiplier,
+          index: this.currentStepIndex + 1,
+          total: this.workflow.steps.length
+        }
       });
+      console.log("EXECUTE_STEP result", result);
 
       if (result && result.success) {
         this.currentStepIndex++;
@@ -74,6 +101,14 @@ export class ReplayOrchestrator {
         error: e.message, 
         index: this.currentStepIndex 
       }).catch(() => {});
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
+        if (tab?.id) {
+          chrome.tabs.sendMessage(tab.id, { 
+            type: 'SHOW_REPLAY_ERROR',
+            payload: { error: e.message || 'Unknown error occurred during replay.' }
+          }).catch(() => {});
+        }
+      });
     }
   }
 

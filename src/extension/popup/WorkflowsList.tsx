@@ -81,6 +81,7 @@ export function WorkflowsList({ user }: { user: User }) {
       type: 'PLAY_WORKFLOW', 
       payload: { workflow, variables: {}, speedMultiplier: speed } 
     });
+    setTimeout(() => window.close(), 100); // Close the popup after a brief delay
   };
 
   const shareWorkflow = (workflowId: string) => {

@@ -102,6 +102,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     orchestrator.stop();
     sendResponse({ success: true });
   }
+  else if (message.type === 'PAUSE_WORKFLOW') {
+    orchestrator.pause();
+    sendResponse({ success: true });
+  }
+  else if (message.type === 'RESUME_WORKFLOW') {
+    orchestrator.resume();
+    sendResponse({ success: true });
+  }
   else if (message.type === 'CLEAR_RECORDED_STEPS') {
     (async () => {
       await chrome.storage.local.set({ currentSteps: [] });

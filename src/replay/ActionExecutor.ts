@@ -18,8 +18,8 @@ export class ActionExecutor {
     let el = resolution.element as HTMLElement;
     let attempts = 0;
 
-    // Poll for the element to appear (up to 5 seconds)
-    while (!el && attempts < 25) {
+    // Poll for the element to appear (up to 15 seconds)
+    while (!el && attempts < 75) {
       await new Promise(res => setTimeout(res, 200));
       resolution = TargetResolver.resolve(step.target);
       el = resolution.element as HTMLElement;
@@ -31,7 +31,8 @@ export class ActionExecutor {
         console.warn(`TARGET_NOT_FOUND for scroll. Falling back to window scroll.`);
         el = document.documentElement;
       } else {
-        throw new Error(`TARGET_NOT_FOUND: ${resolution.reason || 'Element did not appear in time'}`);
+        const targetDesc = step.target.text ? `"${step.target.text}"` : (step.target.selector || step.target.id || step.target.name || 'element');
+        throw new Error(`Could not find ${targetDesc} after 15s`);
       }
     }
 

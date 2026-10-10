@@ -22,6 +22,16 @@ export class Recorder {
     console.log("FlowOnce: Recording started");
   }
 
+  public pause() {
+    this.isRecording = false;
+    console.log("FlowOnce: Recording paused");
+  }
+
+  public resume() {
+    this.isRecording = true;
+    console.log("FlowOnce: Recording resumed");
+  }
+
   public stop() {
     this.isRecording = false;
     console.log("FlowOnce: Recording stopped");
@@ -48,7 +58,10 @@ export class Recorder {
     const target = customTarget || (event.target as Element);
     if (!target) return;
 
-    // Ignore events from the extension itself if applicable
+    // Ignore events from the extension itself
+    if (target.closest && (target.closest('#flowonce-recording-indicator') || target.closest('#flowonce-save-modal'))) {
+      return;
+    }
     
     this.stepCount++;
     const step: WorkflowStep = {
