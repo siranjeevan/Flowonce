@@ -61,11 +61,19 @@ export class ActionExecutor {
   }
 
   private static executeClick(el: HTMLElement): boolean {
-    el.focus();
+    if (typeof el.focus === 'function') {
+      try { el.focus(); } catch {}
+    }
     
-    // Dispatch a sequence of events to simulate a real click
+    // Find closest clickable ancestor (button, anchor, or custom role)
+    const clickable = (el.closest('button, a, [role="button"], [role="link"], input[type="button"], input[type="submit"]') as HTMLElement) || el;
+
+    if (clickable !== el && typeof clickable.focus === 'function') {
+      try { clickable.focus(); } catch {}
+    }
+
+    // Dispatch a complete sequence of pointer and mouse events
     const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-    
     for (const eventType of events) {
       const event = new MouseEvent(eventType, {
         view: window,
@@ -75,6 +83,33 @@ export class ActionExecutor {
       });
       el.dispatchEvent(event);
     }
+
+    // If clickable parent is different, also dispatch click event directly to it
+    if (clickable !== el) {
+      const event = new MouseEvent('click', {
+        view: window,
+        bubbles: true,
+        cancelable: true,
+        buttons: 0
+      });
+      clickable.dispatchEvent(event);
+    }
+
+    // Call native click method to invoke native button actions or form submissions
+    try {
+      if (typeof clickable.click === 'function') {
+        clickable.click();
+      } else if (typeof el.click === 'function') {
+        el.click();
+      }
+    } catch {}
+
+    // If target is or is inside an <a> link, ensure it navigates in the current tab
+    const link = el.closest('a') || (clickable instanceof HTMLAnchorElement ? clickable : null);
+    if (link && link.href && !link.href.startsWith('javascript:')) {
+      if (link.target === '_blank') link.target = '_self';
+      try { link.click(); } catch {}
+    }
     
     return true;
   }
@@ -82,9 +117,26 @@ export class ActionExecutor {
   private static executeInput(el: HTMLElement, value: string): boolean {
     if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
       el.focus();
-      el.value = value;
+      
+      // Use prototype setter to trigger React/Vue/Angular change trackers
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        el instanceof HTMLInputElement ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype,
+        'value'
+      )?.set;
+
+      if (nativeSetter) {
+        nativeSetter.call(el, value);
+      } else {
+        el.value = value;
+      }
+
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    } else if (el.isContentEditable) {
+      el.focus();
+      el.innerText = value;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true }));
       return true;
     }
     return false;

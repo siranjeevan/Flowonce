@@ -1,5 +1,6 @@
 import { Recorder } from '../../recorder/event-capture';
 import type { WorkflowStep } from '../../shared/types/workflow';
+import { ActionExecutor } from '../../replay/ActionExecutor';
 
 console.log("FlowOnce Content Script injected.");
 
@@ -231,6 +232,10 @@ function showReplayIndicator(stepIndex: number, totalSteps: number, stepType: st
       fontFamily: "'Inter', system-ui, sans-serif",
       color: '#CDE4E6'
     });
+  } else {
+    // Reset border in case it was previously an error
+    replayIndicatorEl.style.border = '1px solid rgba(249, 223, 159, 0.2)';
+    replayIndicatorEl.style.pointerEvents = 'auto';
   }
   
   replayIndicatorEl.innerHTML = `
@@ -244,9 +249,14 @@ function showReplayIndicator(stepIndex: number, totalSteps: number, stepType: st
         <span style="color: #CDE4E6; font-weight: 700; margin-right: 4px;">${stepType.toUpperCase()}</span> ${stepValue}
       </span>
     </div>
-    <button id="flowonce-pause-replay-btn" style="margin-left: 12px; background: transparent; border: 1px solid rgba(249, 223, 159, 0.4); color: #F9DF9F; border-radius: 6px; padding: 4px 8px; font-size: 11px; font-weight: bold; cursor: pointer; transition: all 0.2s;">
-      ⏸ Pause
-    </button>
+    <div style="display: flex; align-items: center; gap: 8px; margin-left: 12px;">
+      <button id="flowonce-pause-replay-btn" style="background: transparent; border: 1px solid rgba(249, 223, 159, 0.4); color: #F9DF9F; border-radius: 6px; padding: 4px 8px; font-size: 11px; font-weight: bold; cursor: pointer; transition: all 0.2s;">
+        ⏸ Pause
+      </button>
+      <button id="flowonce-stop-replay-btn" style="background: rgba(255, 77, 79, 0.15); border: 1px solid rgba(255, 77, 79, 0.4); color: #ff4d4f; border-radius: 6px; padding: 4px 8px; font-size: 11px; font-weight: bold; cursor: pointer; transition: all 0.2s;">
+        ⏹ Stop
+      </button>
+    </div>
   `;
   
   // Attach event listener for Pause/Resume Replay
@@ -272,6 +282,14 @@ function showReplayIndicator(stepIndex: number, totalSteps: number, stepType: st
         if(statusEl) statusEl.innerHTML = '(Paused)';
         chrome.runtime.sendMessage({ type: 'PAUSE_WORKFLOW' });
       }
+    });
+  }
+
+  const stopReplayBtn = replayIndicatorEl.querySelector('#flowonce-stop-replay-btn');
+  if (stopReplayBtn) {
+    stopReplayBtn.addEventListener('click', () => {
+      hideReplayIndicator();
+      chrome.runtime.sendMessage({ type: 'STOP_WORKFLOW' });
     });
   }
   
@@ -300,23 +318,24 @@ function showReplayError(errorMessage: string) {
   }
   
   if (replayIndicatorEl) {
-    replayIndicatorEl.style.border = '1px solid rgba(255, 77, 79, 0.5)';
+    replayIndicatorEl.style.border = '1px solid rgba(255, 77, 79, 0.6)';
     replayIndicatorEl.style.pointerEvents = 'auto'; // allow interaction for copying
     replayIndicatorEl.innerHTML = `
       <div style="display: flex; align-items: center; gap: 12px;">
-        <div style="width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; background-color: #ff4d4f; color: white; border-radius: 50%; font-size: 12px; font-weight: bold; font-family: sans-serif;">!</div>
+        <div style="width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; background-color: #ff4d4f; color: white; border-radius: 50%; font-size: 11px; font-weight: bold; font-family: sans-serif;">!</div>
         <span style="font-size: 14px; font-weight: 600; color: #ff4d4f; letter-spacing: 0.5px;">Replay Failed</span>
-        <span style="user-select: text; cursor: text; font-size: 12px; font-weight: 500; opacity: 0.9; background: rgba(255, 77, 79, 0.1); padding: 4px 10px; border-radius: 6px; border: 1px solid rgba(255, 77, 79, 0.2); max-width: 400px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #ff4d4f;" title="${errorMessage.replace(/"/g, '&quot;')}">
+        <span style="user-select: text; cursor: text; font-size: 12px; font-weight: 500; opacity: 0.95; background: rgba(255, 77, 79, 0.12); padding: 5px 12px; border-radius: 6px; border: 1px solid rgba(255, 77, 79, 0.3); max-width: 450px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #ff6b6b;" title="${errorMessage.replace(/"/g, '&quot;')}">
           ${errorMessage}
         </span>
-        <button id="flowonce-copy-error-btn" style="background: rgba(255, 77, 79, 0.1); border: 1px solid rgba(255,77,79,0.3); color: #ff4d4f; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: bold; cursor: pointer; transition: all 0.2s;">Copy</button>
+        <button id="flowonce-copy-error-btn" style="background: rgba(255, 77, 79, 0.15); border: 1px solid rgba(255,77,79,0.4); color: #ff4d4f; border-radius: 4px; padding: 4px 10px; font-size: 11px; font-weight: bold; cursor: pointer; transition: all 0.2s;">Copy</button>
+        <button id="flowonce-close-error-btn" style="background: transparent; border: none; color: rgba(255,255,255,0.6); font-size: 14px; cursor: pointer; padding: 2px 6px; line-height: 1;">✕</button>
       </div>
     `;
 
     const copyBtn = document.getElementById('flowonce-copy-error-btn');
     if (copyBtn) {
-      copyBtn.addEventListener('mouseover', () => copyBtn.style.background = 'rgba(255, 77, 79, 0.2)');
-      copyBtn.addEventListener('mouseout', () => copyBtn.style.background = 'rgba(255, 77, 79, 0.1)');
+      copyBtn.addEventListener('mouseover', () => copyBtn.style.background = 'rgba(255, 77, 79, 0.25)');
+      copyBtn.addEventListener('mouseout', () => copyBtn.style.background = 'rgba(255, 77, 79, 0.15)');
       copyBtn.addEventListener('click', () => {
         navigator.clipboard.writeText(errorMessage).then(() => {
           copyBtn.innerText = 'Copied!';
@@ -325,8 +344,13 @@ function showReplayError(errorMessage: string) {
       });
     }
 
-    // Auto-hide after 15 seconds to give them plenty of time to read/copy
-    setTimeout(() => hideReplayIndicator(), 15000);
+    const closeBtn = document.getElementById('flowonce-close-error-btn');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => hideReplayIndicator());
+    }
+
+    // Auto-hide after 30 seconds to give plenty of time to view or copy
+    setTimeout(() => hideReplayIndicator(), 30000);
   }
 }
 
@@ -367,14 +391,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       showReplayIndicator(index, total, step.type, stepDetail);
     }
     
-    import('../../replay/ActionExecutor').then(({ ActionExecutor }) => {
-      ActionExecutor.execute(step, speedMultiplier)
-        .then(() => sendResponse({ success: true }))
-        .catch(err => {
-          hideReplayIndicator();
-          sendResponse({ success: false, error: err.message });
-        });
-    });
+    ActionExecutor.execute(step, speedMultiplier)
+      .then(() => {
+        sendResponse({ success: true });
+      })
+      .catch(err => {
+        const errorMsg = err?.message || 'Execution failed';
+        showReplayError(errorMsg);
+        sendResponse({ success: false, error: errorMsg });
+      });
     return true; // Keep message channel open for async response
   } else if (message.type === 'HIDE_REPLAY_INDICATOR') {
     hideReplayIndicator();
@@ -388,9 +413,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 // Check if recording is already active (e.g. after a page navigation)
 chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATE' }, (response) => {
   if (response && response.isRecording) {
-    console.log("FlowOnce: Resuming recording after navigation");
+    console.log("FlowOnce: Resuming recording after navigation with step count", response.stepCount);
     initializeRecorder();
-    recorder?.start();
+    recorder?.start(response.stepCount || 0);
     showRecordingIndicator();
   }
 });

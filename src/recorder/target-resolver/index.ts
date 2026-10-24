@@ -1,41 +1,60 @@
 import type { TargetDescriptor, Position } from '../../shared/types/workflow';
 
 export function extractTargetInfo(el: Element): TargetDescriptor {
+  // If clicked inside or on an interactive element (button, link, input, select, etc.),
+  // the interactive element IS the primary target the user intended to interact with!
+  const interactive = el.closest('a, button, [role="button"], [role="link"], input, select, textarea');
+  const targetEl = interactive || el;
+
   const descriptor: TargetDescriptor = {
-    tag: el.tagName.toLowerCase(),
+    tag: targetEl.tagName.toLowerCase(),
   };
 
-  if (el.id) descriptor.id = el.id;
-  
-  const testId = el.getAttribute('data-testid');
+  // 1. IDs (check targetEl first, fallback to child el)
+  const id = targetEl.id || el.id;
+  if (id) descriptor.id = id;
+
+  // 2. Test IDs
+  const testId = targetEl.getAttribute('data-testid') || el.getAttribute('data-testid');
   if (testId) descriptor.testId = testId;
-  
-  const name = el.getAttribute('name');
+
+  // 3. Name & Role
+  const name = targetEl.getAttribute('name') || el.getAttribute('name');
   if (name) descriptor.name = name;
-  
-  const role = el.getAttribute('role');
+
+  const role = targetEl.getAttribute('role') || el.getAttribute('role');
   if (role) descriptor.role = role;
-  
-  const ariaLabel = el.getAttribute('aria-label');
+
+  // 4. Aria Label & Title
+  const ariaLabel = targetEl.getAttribute('aria-label') || el.getAttribute('aria-label') || targetEl.getAttribute('title') || el.getAttribute('title');
   if (ariaLabel) descriptor.ariaLabel = ariaLabel;
-  
-  const placeholder = el.getAttribute('placeholder');
+
+  // 5. Placeholder
+  const placeholder = targetEl.getAttribute('placeholder') || el.getAttribute('placeholder');
   if (placeholder) descriptor.placeholder = placeholder;
-  
-  const href = el.getAttribute('href');
+
+  // 6. Href (Critical for links like GitHub repos!)
+  const href = targetEl.getAttribute('href') || (targetEl instanceof HTMLAnchorElement ? targetEl.pathname : null) || el.getAttribute('href');
   if (href) descriptor.href = href;
-  
-  const src = el.getAttribute('src');
+
+  // 7. Src (for images)
+  const src = targetEl.getAttribute('src') || el.getAttribute('src');
   if (src) descriptor.src = src;
+
+  // 8. Text Content (Critical for buttons, menu items, repo links!)
+  // Normalize whitespace:
+  const rawTargetText = targetEl.textContent?.replace(/\s+/g, ' ')?.trim();
+  const rawElText = el.textContent?.replace(/\s+/g, ' ')?.trim();
   
-  // Basic text content (trim and normalize whitespace)
-  const text = el.textContent?.replace(/\s+/g, ' ')?.trim();
+  // Prefer targetEl's text (e.g. "siranjeevan / Git-puch-extension"), fallback to child text
+  const text = rawTargetText || rawElText;
   if (text && text.length > 0) {
-    descriptor.text = text.substring(0, 60);
+    descriptor.text = text.substring(0, 100);
   }
-  
-  descriptor.selector = generateCssSelector(el);
-  
+
+  // 9. Generate CSS Selector for the primary target element
+  descriptor.selector = generateCssSelector(targetEl);
+
   return descriptor;
 }
 
@@ -54,7 +73,47 @@ export function calculateRelativePosition(el: Element, clientX: number, clientY:
 
 function generateCssSelector(el: Element): string {
   if (el.tagName.toLowerCase() === 'html') return 'html';
-  if (el.id) return `#${el.id}`;
+  if (el.id) {
+    const isDynamic = /\d{3,}/.test(el.id) || el.id.length > 35;
+    if (!isDynamic) {
+      try { return `#${CSS.escape(el.id)}`; } catch { return `#${el.id}`; }
+    }
+  }
+
+  // Fast check: If element is an <a> tag with unique href:
+  if (el.tagName.toLowerCase() === 'a') {
+    const href = el.getAttribute('href');
+    if (href && !href.startsWith('#') && !href.startsWith('javascript:') && href.length < 120) {
+      try {
+        const selector = `a[href="${CSS.escape(href)}"]`;
+        if (document.querySelectorAll(selector).length === 1) {
+          return selector;
+        }
+      } catch {}
+    }
+  }
+
+  // Fast check: If element is a button with unique aria-label or name:
+  if (el.tagName.toLowerCase() === 'button') {
+    const aria = el.getAttribute('aria-label');
+    if (aria && aria.length < 60 && !/\d{4,}/.test(aria)) {
+      try {
+        const selector = `button[aria-label="${CSS.escape(aria)}"]`;
+        if (document.querySelectorAll(selector).length === 1) {
+          return selector;
+        }
+      } catch {}
+    }
+    const name = el.getAttribute('name');
+    if (name && !/\d{4,}/.test(name)) {
+      try {
+        const selector = `button[name="${CSS.escape(name)}"]`;
+        if (document.querySelectorAll(selector).length === 1) {
+          return selector;
+        }
+      } catch {}
+    }
+  }
   
   const parts: string[] = [];
   let current: Element | null = el;
@@ -64,38 +123,73 @@ function generateCssSelector(el: Element): string {
     
     // 1. Check for ID
     if (current.id) {
-      // Avoid highly dynamic IDs (those with numbers or too long)
-      const isDynamic = /\\d/.test(current.id) || current.id.length > 30;
+      const isDynamic = /\d{3,}/.test(current.id) || current.id.length > 35;
       if (!isDynamic) {
-        parts.unshift(`#${current.id}`);
-        break; 
+        try {
+          parts.unshift(`#${CSS.escape(current.id)}`);
+          break;
+        } catch {}
       }
     }
     
     // 2. Check for common testing attributes
     const testAttr = ['data-testid', 'data-test', 'data-cy'].find(attr => current!.getAttribute(attr));
     if (testAttr) {
-      parts.unshift(`[${testAttr}="${current.getAttribute(testAttr)}"]`);
-      break; // Safe to stop at a test ID
+      const val = current.getAttribute(testAttr)!;
+      try {
+        parts.unshift(`[${testAttr}="${CSS.escape(val)}"]`);
+        break;
+      } catch {}
     }
-    
-    // 3. Try to use stable classes
-    if (current.className && typeof current.className === 'string') {
-      const classes = current.className.split(/\\s+/).filter(c => 
-        c.length > 0 && 
-        !c.includes(':') && // Ignore tailwind pseudo-selectors
-        !c.match(/^[a-zA-Z0-9_-]{1,3}$/) && // Ignore minified classes like 'a', 'b', 'xyz'
-        !c.match(/\\d+/) && // Ignore classes with numbers (often dynamically generated like css-1x2y)
-        !c.startsWith('sc-') && // Ignore styled-components
-        !c.startsWith('css-') // Ignore emotion
-      );
-      
-      if (classes.length > 0) {
-        selector += `.${classes.join('.')}`;
+
+    // 3. For interactive elements, check for stable aria-label, name, or href
+    if (['button', 'input', 'a', 'select'].includes(current.tagName.toLowerCase())) {
+      const aria = current.getAttribute('aria-label');
+      if (aria && aria.length < 50 && !/\d{4,}/.test(aria)) {
+        try {
+          parts.unshift(`${current.tagName.toLowerCase()}[aria-label="${CSS.escape(aria)}"]`);
+          break;
+        } catch {}
+      }
+      const name = current.getAttribute('name');
+      if (name && !/\d{4,}/.test(name)) {
+        try {
+          parts.unshift(`${current.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`);
+          break;
+        } catch {}
+      }
+      if (current.tagName.toLowerCase() === 'a') {
+        const href = current.getAttribute('href');
+        if (href && !href.startsWith('#') && !href.startsWith('javascript:') && href.length < 80) {
+          try {
+            parts.unshift(`a[href="${CSS.escape(href)}"]`);
+            break;
+          } catch {}
+        }
       }
     }
     
-    // 4. Calculate exact index among same-tag siblings to guarantee uniqueness
+    // 4. Try to use stable classes
+    if (current.className && typeof current.className === 'string') {
+      const classes = current.className.split(/\s+/).filter(c => 
+        c.length > 0 && 
+        !c.includes(':') && // Ignore tailwind pseudo-selectors
+        !c.includes('/') &&
+        !c.includes('[') &&
+        !c.match(/^[a-zA-Z0-9_-]{1,2}$/) && // Ignore minified single-letter classes
+        !c.match(/\d{3,}/) && // Ignore classes with 3+ digits (dynamically generated)
+        !c.startsWith('sc-') && 
+        !c.startsWith('css-')
+      );
+      
+      if (classes.length > 0) {
+        try {
+          selector += `.${classes.slice(0, 3).map(c => CSS.escape(c)).join('.')}`;
+        } catch {}
+      }
+    }
+    
+    // 5. Calculate exact index among same-tag siblings to guarantee uniqueness
     let sibling = current.previousElementSibling;
     let nth = 1;
     while (sibling) {
@@ -104,7 +198,6 @@ function generateCssSelector(el: Element): string {
       }
       sibling = sibling.previousElementSibling;
     }
-    // Always append nth-of-type to avoid ambiguity (unless we already stopped at a unique ID/testAttr)
     selector += `:nth-of-type(${nth})`;
     
     parts.unshift(selector);

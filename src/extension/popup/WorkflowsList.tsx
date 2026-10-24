@@ -73,13 +73,20 @@ export function WorkflowsList({ user }: { user: User }) {
     }
   };
 
-  const playWorkflow = (workflow: Workflow) => {
+  const playWorkflow = async (workflow: Workflow) => {
     setErrorState(null);
     setPlayingWorkflowId(workflow.id);
     setRunningProgress({ index: 1, total: workflow.steps.length, type: 'starting' });
+
+    let targetTabId: number | undefined;
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      targetTabId = tab?.id;
+    } catch {}
+
     chrome.runtime.sendMessage({ 
       type: 'PLAY_WORKFLOW', 
-      payload: { workflow, variables: {}, speedMultiplier: speed } 
+      payload: { workflow, variables: {}, speedMultiplier: speed, tabId: targetTabId } 
     });
     setTimeout(() => window.close(), 100); // Close the popup after a brief delay
   };

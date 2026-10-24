@@ -95,7 +95,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true; // async
   }
   else if (message.type === 'PLAY_WORKFLOW') {
-    orchestrator.start(message.payload.workflow, message.payload.variables, message.payload.speedMultiplier || 1);
+    orchestrator.start(
+      message.payload.workflow, 
+      message.payload.variables, 
+      message.payload.speedMultiplier || 1,
+      message.payload.tabId
+    );
     sendResponse({ success: true });
   }
   else if (message.type === 'STOP_WORKFLOW') {

@@ -15,11 +15,11 @@ export class Recorder {
     this.bindEvents();
   }
 
-  public start() {
+  public start(initialStepCount = 0) {
     this.isRecording = true;
-    this.stepCount = 0;
+    this.stepCount = initialStepCount;
     this.sessionStartTime = Date.now();
-    console.log("FlowOnce: Recording started");
+    console.log("FlowOnce: Recording started with stepCount", initialStepCount);
   }
 
   public pause() {
