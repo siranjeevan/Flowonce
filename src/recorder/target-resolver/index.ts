@@ -52,7 +52,59 @@ export function extractTargetInfo(el: Element): TargetDescriptor {
     descriptor.text = text.substring(0, 100);
   }
 
-  // 9. Generate CSS Selector for the primary target element
+  // 9. Container Context (Critical for disambiguating repeated items in tables, cards, lists!)
+  try {
+    const container =
+      targetEl.closest(
+        'tr, [role="row"], li, [role="listitem"], article, [data-card], .card, .panel, section, [role="region"], fieldset, form, [role="group"]'
+      ) || targetEl.parentElement;
+    if (container && container !== targetEl && container !== document.body && container !== document.documentElement) {
+      const heading = container.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"], strong, b, .title');
+      const headingText = heading?.textContent?.replace(/\s+/g, ' ')?.trim();
+      if (headingText && headingText.length > 1 && headingText !== descriptor.text) {
+        descriptor.containerText = headingText.substring(0, 80);
+      } else {
+        const rawContainer = container.textContent?.replace(/\s+/g, ' ')?.trim() || '';
+        if (rawContainer && rawContainer !== descriptor.text) {
+          const snippet = rawContainer.replace(descriptor.text || '', '').trim();
+          if (snippet.length > 1) {
+            descriptor.containerText = snippet.substring(0, 80);
+          }
+        }
+      }
+    }
+  } catch {}
+
+  // 10. Frame Context (if target resides in an accessible iframe)
+  try {
+    if (typeof window !== 'undefined' && targetEl.ownerDocument && targetEl.ownerDocument !== window.document) {
+      const iframes = Array.from(window.document.querySelectorAll('iframe'));
+      for (const iframe of iframes) {
+        try {
+          if (iframe.contentDocument === targetEl.ownerDocument) {
+            descriptor.frameSelector = iframe.id
+              ? `#${iframe.id}`
+              : iframe.name
+              ? `iframe[name="${iframe.name}"]`
+              : generateCssSelector(iframe);
+            break;
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  // 11. Context Snippet (e.g. associated form label)
+  if (targetEl.id) {
+    try {
+      const label = document.querySelector(`label[for="${CSS.escape(targetEl.id)}"]`);
+      if (label?.textContent) {
+        descriptor.contextSnippet = label.textContent.replace(/\s+/g, ' ').trim().substring(0, 60);
+      }
+    } catch {}
+  }
+
+  // 12. Generate CSS Selector for the primary target element
   descriptor.selector = generateCssSelector(targetEl);
 
   return descriptor;

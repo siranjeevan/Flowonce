@@ -11,10 +11,50 @@ export function WorkflowsList({ user }: { user: User }) {
   const [playingWorkflowId, setPlayingWorkflowId] = useState<string | null>(null);
   const [runningProgress, setRunningProgress] = useState<{ index: number, total: number, type: string } | null>(null);
   const [expandedWorkflowId, setExpandedWorkflowId] = useState<string | null>(null);
-  const [errorState, setErrorState] = useState<{ id: string, index: number, message: string } | null>(null);
+  const [errorState, setErrorState] = useState<{
+    id: string;
+    index: number;
+    message: string;
+    isRecoveryRequired?: boolean;
+    isUncertain?: boolean;
+  } | null>(null);
   const [speed, setSpeed] = useState<number>(1);
 
   useEffect(() => {
+    // Initial status query on popup open
+    chrome.runtime.sendMessage({ type: 'GET_REPLAY_STATUS' }, (resp) => {
+      if (resp && resp.success && resp.session) {
+        const session = resp.session;
+        if (
+          session.status === 'RUNNING' ||
+          session.status === 'WAITING' ||
+          session.status === 'PAUSED' ||
+          session.status === 'NAVIGATING'
+        ) {
+          setPlayingWorkflowId(session.workflowId);
+          setRunningProgress({
+            index: session.currentStepIndex + 1,
+            total: session.totalSteps,
+            type: session.status.toLowerCase(),
+          });
+        } else if (session.status === 'RECOVERY_REQUIRED') {
+          setErrorState({
+            id: session.workflowId,
+            index: session.currentStepIndex + 1,
+            message: session.lastError || 'Session requires recovery attention',
+            isRecoveryRequired: true,
+            isUncertain: session.actionState === 'OUTCOME_UNKNOWN',
+          });
+        } else if (session.status === 'FAILED') {
+          setErrorState({
+            id: session.workflowId,
+            index: session.currentStepIndex + 1,
+            message: session.lastError || 'Session failed',
+          });
+        }
+      }
+    });
+
     const listener = (message: any) => {
       if (message.type === 'REPLAY_FINISHED') {
         setPlayingWorkflowId(null);
@@ -29,6 +69,43 @@ export function WorkflowsList({ user }: { user: User }) {
             message: message.error
           });
         }
+      } else if (message.type === 'REPLAY_STATUS_CHANGED' && message.payload?.session) {
+        const session = message.payload.session;
+        if (
+          session.status === 'RUNNING' ||
+          session.status === 'WAITING' ||
+          session.status === 'PAUSED' ||
+          session.status === 'NAVIGATING'
+        ) {
+          setPlayingWorkflowId(session.workflowId);
+          setRunningProgress({
+            index: session.currentStepIndex + 1,
+            total: session.totalSteps,
+            type: session.status.toLowerCase(),
+          });
+        } else if (session.status === 'COMPLETED' || session.status === 'CANCELLED') {
+          setPlayingWorkflowId(null);
+          setRunningProgress(null);
+          setErrorState(null);
+        } else if (session.status === 'RECOVERY_REQUIRED') {
+          setPlayingWorkflowId(null);
+          setRunningProgress(null);
+          setErrorState({
+            id: session.workflowId,
+            index: session.currentStepIndex + 1,
+            message: session.lastError || 'Action outcome is uncertain. Replay paused.',
+            isRecoveryRequired: true,
+            isUncertain: session.actionState === 'OUTCOME_UNKNOWN',
+          });
+        } else if (session.status === 'FAILED') {
+          setPlayingWorkflowId(null);
+          setRunningProgress(null);
+          setErrorState({
+            id: session.workflowId,
+            index: session.currentStepIndex + 1,
+            message: session.lastError || 'Execution failed',
+          });
+        }
       } else if (message.type === 'REPLAY_STEP_START') {
         setRunningProgress({
           index: message.index + 1,
@@ -36,7 +113,6 @@ export function WorkflowsList({ user }: { user: User }) {
           type: message.stepType
         });
         if (message.workflowId) {
-          // Clear error if we are restarting
           setErrorState(prev => prev?.id === message.workflowId ? null : prev);
         }
       }
@@ -84,11 +160,25 @@ export function WorkflowsList({ user }: { user: User }) {
       targetTabId = tab?.id;
     } catch {}
 
-    chrome.runtime.sendMessage({ 
-      type: 'PLAY_WORKFLOW', 
-      payload: { workflow, variables: {}, speedMultiplier: speed, tabId: targetTabId } 
-    });
-    setTimeout(() => window.close(), 100); // Close the popup after a brief delay
+    chrome.runtime.sendMessage(
+      { 
+        type: 'PLAY_WORKFLOW', 
+        payload: { workflow, variables: {}, speedMultiplier: speed, tabId: targetTabId } 
+      },
+      (response) => {
+        if (response && !response.success && response.error) {
+          setErrorState({
+            id: workflow.id,
+            index: 0,
+            message: response.error,
+          });
+          setPlayingWorkflowId(null);
+          setRunningProgress(null);
+        } else {
+          setTimeout(() => window.close(), 100);
+        }
+      }
+    );
   };
 
   const shareWorkflow = (workflowId: string) => {
@@ -302,17 +392,64 @@ export function WorkflowsList({ user }: { user: User }) {
                 </div>
 
                 {errorState?.id === wf.id && (
-                  <div className="mt-3 ml-8 mr-2 p-2 rounded bg-red-500/10 border border-red-500/20 text-xs text-red-400">
-                    <span className="font-bold flex items-center gap-1">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
-                      Failed at Step {errorState.index}
-                    </span>
-                    <p className="mt-0.5 opacity-80 break-words">
-                      {errorState.message.includes('TARGET_NOT_FOUND') 
-                        ? 'Could not find the element on the page. It may have changed or taken too long to load.' 
-                        : errorState.message}
-                    </p>
-                  </div>
+                  errorState.isRecoveryRequired ? (
+                    <div className="mt-3 ml-8 mr-2 p-2.5 rounded bg-amber-500/15 border border-amber-500/30 text-xs text-amber-300">
+                      <span className="font-bold flex items-center gap-1.5 text-amber-400">
+                        <span>⚠️</span>
+                        Recovery Required at Step {errorState.index}
+                      </span>
+                      <p className="mt-1 opacity-90 text-[11px] leading-relaxed">
+                        {errorState.message}
+                      </p>
+                      <div className="flex gap-2 mt-2">
+                        <button
+                          onClick={() => {
+                            chrome.runtime.sendMessage({
+                              type: 'RESUME_WORKFLOW',
+                              payload: { forceAdvance: true },
+                            });
+                            setErrorState(null);
+                          }}
+                          className="bg-amber-500/25 hover:bg-amber-500/40 text-amber-300 px-2 py-1 rounded text-[10px] font-bold border border-amber-500/40 transition-colors"
+                        >
+                          Resume Next Step
+                        </button>
+                        <button
+                          onClick={() => {
+                            chrome.runtime.sendMessage({
+                              type: 'RESUME_WORKFLOW',
+                              payload: { forceAdvance: false },
+                            });
+                            setErrorState(null);
+                          }}
+                          className="bg-[#263056] hover:bg-[#1A2240] text-[#CDE4E6] px-2 py-1 rounded text-[10px] font-semibold border border-[#CDE4E6]/20 transition-colors"
+                        >
+                          Retry Step
+                        </button>
+                        <button
+                          onClick={() => {
+                            chrome.runtime.sendMessage({ type: 'STOP_WORKFLOW' });
+                            setErrorState(null);
+                          }}
+                          className="text-red-400 hover:text-red-300 px-2 py-1 rounded text-[10px] font-semibold transition-colors"
+                        >
+                          Stop
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 ml-8 mr-2 p-2 rounded bg-red-500/10 border border-red-500/20 text-xs text-red-400">
+                      <span className="font-bold flex items-center gap-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
+                        Failed at Step {errorState.index}
+                      </span>
+                      <p className="mt-0.5 opacity-80 break-words">
+                        {errorState.message.includes('TARGET_NOT_FOUND') 
+                          ? 'Could not find the element on the page. It may have changed or taken too long to load.' 
+                          : errorState.message}
+                      </p>
+                    </div>
+                  )
                 )}
 
                 <div className="flex space-x-2 mt-3 ml-8 mr-2">

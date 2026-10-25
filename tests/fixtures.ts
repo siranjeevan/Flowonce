@@ -1,13 +1,17 @@
 import { test as base, chromium, type BrowserContext } from '@playwright/test';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 
 export const test = base.extend<{
   context: BrowserContext;
   extensionId: string;
 }>({
-  context: async (_args, use) => {
-    const pathToExtension = path.join(__dirname, '../dist');
-    const context = await chromium.launchPersistentContext('', {
+  context: async ({}, use) => {
+    const pathToExtension = path.resolve(process.cwd(), 'dist');
+    const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'flowonce-playwright-'));
+
+    const context = await chromium.launchPersistentContext(userDataDir, {
       headless: false,
       args: [
         `--disable-extensions-except=${pathToExtension}`,
@@ -17,12 +21,28 @@ export const test = base.extend<{
     // eslint-disable-next-line react-hooks/rules-of-hooks
     await use(context);
     await context.close();
+    try {
+      fs.rmSync(userDataDir, { recursive: true, force: true });
+    } catch {}
   },
   extensionId: async ({ context }, use) => {
     // for manifest v3:
     let [background] = context.serviceWorkers();
-    if (!background)
-      background = await context.waitForEvent('serviceworker');
+    if (!background) {
+      try {
+        background = await context.waitForEvent('serviceworker', { timeout: 8000 });
+      } catch {
+        // Fallback: check existing service workers or background pages
+        const workers = context.serviceWorkers();
+        if (workers.length > 0) {
+          background = workers[0];
+        }
+      }
+    }
+
+    if (!background) {
+      throw new Error('Could not locate extension background service worker');
+    }
 
     const extensionId = background.url().split('/')[2];
     // eslint-disable-next-line react-hooks/rules-of-hooks

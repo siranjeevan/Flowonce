@@ -144,7 +144,7 @@ function showSaveModal() {
 
   document.getElementById('flowonce-cancel-btn')?.addEventListener('click', () => {
     chrome.runtime.sendMessage({ type: 'STOP_AND_SAVE_RECORDING' }); // Just stop it without saving
-    document.body.removeChild(modalEl);
+    if (modalEl.parentNode) document.body.removeChild(modalEl);
   });
 
   document.getElementById('flowonce-save-btn')?.addEventListener('click', () => {
@@ -162,20 +162,83 @@ function showSaveModal() {
       type: 'SAVE_WORKFLOW_FROM_CONTENT',
       payload: { name }
     }, (response) => {
+      if (modalEl.parentNode) document.body.removeChild(modalEl);
+
       if (chrome.runtime.lastError) {
          console.error(chrome.runtime.lastError);
-         alert("❌ Extension connection error. Please refresh the page and try again.");
-         if (modalEl.parentNode) document.body.removeChild(modalEl);
+         showFlowOnceToast("Extension Connection Error", "Please refresh the page and try again.", false);
          return;
       }
-      if (modalEl.parentNode) document.body.removeChild(modalEl);
       if (response && response.success) {
-        alert("✅ Workflow Saved Successfully!\n\nYou can view and run it from the FlowOnce extension popup.");
+        showFlowOnceToast("Workflow Saved Successfully!", "You can view and run it from the FlowOnce extension popup.", true);
       } else {
-        alert("❌ Failed to save workflow: " + (response?.error || 'Unknown error'));
+        showFlowOnceToast("Failed to Save Workflow", response?.error || 'Unknown error occurred.', false);
       }
     });
   });
+}
+
+function showFlowOnceToast(title: string, subtitle?: string, isSuccess = true) {
+  const existing = document.getElementById('flowonce-toast');
+  if (existing && existing.parentNode) {
+    existing.parentNode.removeChild(existing);
+  }
+
+  const toast = document.createElement('div');
+  toast.id = 'flowonce-toast';
+  Object.assign(toast.style, {
+    position: 'fixed',
+    top: '28px',
+    left: '50%',
+    transform: 'translateX(-50%) translateY(-20px)',
+    backgroundColor: '#263056',
+    border: isSuccess ? '1px solid rgba(249, 223, 159, 0.4)' : '1px solid rgba(255, 77, 79, 0.4)',
+    borderRadius: '14px',
+    padding: '14px 22px',
+    boxShadow: '0 16px 40px rgba(0,0,0,0.5), 0 0 1px rgba(255,255,255,0.1)',
+    zIndex: '2147483647',
+    fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+    display: 'flex',
+    alignItems: 'center',
+    gap: '14px',
+    color: '#CDE4E6',
+    maxWidth: '460px',
+    opacity: '0',
+    transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+    pointerEvents: 'auto'
+  });
+
+  const icon = isSuccess ? '✅' : '❌';
+  toast.innerHTML = `
+    <span style="font-size: 20px; line-height: 1;">${icon}</span>
+    <div style="display: flex; flex-direction: column; gap: 2px;">
+      <span style="color: ${isSuccess ? '#F9DF9F' : '#ff7875'}; font-size: 14px; font-weight: 700; line-height: 1.3;">${title}</span>
+      ${subtitle ? `<span style="color: #CDE4E6; opacity: 0.85; font-size: 12px; line-height: 1.4;">${subtitle}</span>` : ''}
+    </div>
+    <button id="flowonce-toast-close" style="
+      background: transparent; border: none; color: #CDE4E6; opacity: 0.6;
+      cursor: pointer; font-size: 16px; line-height: 1; padding: 4px; margin-left: 8px;
+    ">✕</button>
+  `;
+
+  document.body.appendChild(toast);
+
+  requestAnimationFrame(() => {
+    toast.style.opacity = '1';
+    toast.style.transform = 'translateX(-50%) translateY(0)';
+  });
+
+  const closeToast = () => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateX(-50%) translateY(-20px)';
+    setTimeout(() => {
+      if (toast.parentNode) toast.parentNode.removeChild(toast);
+    }, 300);
+  };
+
+  toast.querySelector('#flowonce-toast-close')?.addEventListener('click', closeToast);
+
+  setTimeout(closeToast, 4000);
 }
 
 function removeRecordingIndicator() {
@@ -354,6 +417,52 @@ function showReplayError(errorMessage: string) {
   }
 }
 
+function showReplayUncertain(message: string) {
+  if (!replayIndicatorEl) {
+    showReplayIndicator(0, 0, 'Action', 'Uncertain');
+  }
+
+  if (replayIndicatorEl) {
+    replayIndicatorEl.style.border = '1px solid rgba(250, 173, 20, 0.8)';
+    replayIndicatorEl.style.pointerEvents = 'auto';
+    replayIndicatorEl.innerHTML = `
+      <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+        <span style="font-size: 16px;">⚠️</span>
+        <span style="font-size: 13px; font-weight: 700; color: #faad14; letter-spacing: 0.5px;">Outcome Uncertain</span>
+        <span style="user-select: text; cursor: text; font-size: 12px; font-weight: 500; opacity: 0.95; background: rgba(250, 173, 20, 0.12); padding: 5px 12px; border-radius: 6px; border: 1px solid rgba(250, 173, 20, 0.3); max-width: 400px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #ffe58f;" title="${message.replace(/"/g, '&quot;')}">
+          ${message}
+        </span>
+        <button id="flowonce-resume-advance-btn" style="background: rgba(250, 173, 20, 0.2); border: 1px solid rgba(250, 173, 20, 0.5); color: #faad14; border-radius: 4px; padding: 4px 10px; font-size: 11px; font-weight: bold; cursor: pointer; transition: all 0.2s;">Resume Next Step</button>
+        <button id="flowonce-stop-uncertain-btn" style="background: rgba(255, 77, 79, 0.15); border: 1px solid rgba(255, 77, 79, 0.4); color: #ff4d4f; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: bold; cursor: pointer; transition: all 0.2s;">Stop</button>
+        <button id="flowonce-close-uncertain-btn" style="background: transparent; border: none; color: rgba(255,255,255,0.6); font-size: 14px; cursor: pointer; padding: 2px 6px; line-height: 1;">✕</button>
+      </div>
+    `;
+
+    const advanceBtn = document.getElementById('flowonce-resume-advance-btn');
+    if (advanceBtn) {
+      advanceBtn.addEventListener('click', () => {
+        chrome.runtime.sendMessage({
+          type: 'RESUME_WORKFLOW',
+          payload: { forceAdvance: true },
+        });
+      });
+    }
+
+    const stopBtn = document.getElementById('flowonce-stop-uncertain-btn');
+    if (stopBtn) {
+      stopBtn.addEventListener('click', () => {
+        hideReplayIndicator();
+        chrome.runtime.sendMessage({ type: 'STOP_WORKFLOW' });
+      });
+    }
+
+    const closeBtn = document.getElementById('flowonce-close-uncertain-btn');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => hideReplayIndicator());
+    }
+  }
+}
+
 // Initialize recorder and handle messages from background/popup
 function initializeRecorder() {
   if (!recorder) {
@@ -372,6 +481,9 @@ function initializeRecorder() {
   }
 }
 
+let activeStepAbortController: AbortController | null = null;
+const executedActionIds = new Set<string>();
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'START_RECORDING') {
     initializeRecorder();
@@ -382,8 +494,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     recorder?.stop();
     removeRecordingIndicator();
     sendResponse({ success: true });
+  } else if (message.type === 'CHECK_ACTION_EXECUTED') {
+    const actionId = message.payload?.actionId;
+    const executed = actionId ? executedActionIds.has(actionId) : false;
+    sendResponse({ success: true, executed });
+    return false;
   } else if (message.type === 'EXECUTE_STEP') {
-    const { step, speedMultiplier, index, total } = message.payload;
+    // Cancel previous step wait if still active
+    if (activeStepAbortController) {
+      activeStepAbortController.abort();
+    }
+    activeStepAbortController = new AbortController();
+
+    const { step, speedMultiplier, index, total, sessionId, actionId } = message.payload;
+
+    // Idempotency check: prevent duplicate execution of already-executed action
+    if (actionId && executedActionIds.has(actionId)) {
+      console.log(`[Content] Action ${actionId} was already executed. Returning cached success.`);
+      sendResponse({ success: true, alreadyExecuted: true, actionId });
+      return false;
+    }
     
     // Extract a descriptive detail for the step
     const stepDetail = step.sensitive ? '••••••••' : (step.value || step.key || (step.target?.text ? `"${step.target.text}"` : step.target?.selector) || '');
@@ -391,21 +521,74 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       showReplayIndicator(index, total, step.type, stepDetail);
     }
     
-    ActionExecutor.execute(step, speedMultiplier)
-      .then(() => {
-        sendResponse({ success: true });
+    ActionExecutor.executeWithVerification(step, speedMultiplier, {
+      signal: activeStepAbortController.signal,
+      sessionId,
+      stepIndex: index,
+      actionId,
+    })
+      .then((execResult) => {
+        if (actionId && execResult.success) {
+          executedActionIds.add(actionId);
+          if (executedActionIds.size > 100) {
+            const first = executedActionIds.values().next().value;
+            if (first) executedActionIds.delete(first);
+          }
+        }
+        activeStepAbortController = null;
+        if (execResult.success) {
+          sendResponse({
+            success: true,
+            actionId,
+            verification: execResult.verification,
+            extractedValue: execResult.extractedValue,
+          });
+        } else {
+          if (execResult.verification?.status === 'OUTCOME_UNKNOWN') {
+            showReplayUncertain(
+              execResult.verification.recoveryRecommendation ||
+                'Action dispatched, but outcome could not be confirmed. Replay paused.'
+            );
+          } else {
+            const errorMsg = execResult.error || 'Action verification failed';
+            showReplayError(errorMsg);
+          }
+          sendResponse({
+            success: false,
+            actionId,
+            verification: execResult.verification,
+            error: execResult.error,
+            code: execResult.code,
+          });
+        }
       })
-      .catch(err => {
+      .catch((err) => {
+        activeStepAbortController = null;
         const errorMsg = err?.message || 'Execution failed';
         showReplayError(errorMsg);
-        sendResponse({ success: false, error: errorMsg });
+        sendResponse({ success: false, error: errorMsg, code: err?.code });
       });
     return true; // Keep message channel open for async response
   } else if (message.type === 'HIDE_REPLAY_INDICATOR') {
+    if (activeStepAbortController) {
+      activeStepAbortController.abort();
+      activeStepAbortController = null;
+    }
     hideReplayIndicator();
     sendResponse({ success: true });
   } else if (message.type === 'SHOW_REPLAY_ERROR') {
-    showReplayError(message.payload.error);
+    if (activeStepAbortController) {
+      activeStepAbortController.abort();
+      activeStepAbortController = null;
+    }
+    showReplayError(message.payload?.error || 'Execution failed');
+    sendResponse({ success: true });
+  } else if (message.type === 'SHOW_REPLAY_UNCERTAIN') {
+    if (activeStepAbortController) {
+      activeStepAbortController.abort();
+      activeStepAbortController = null;
+    }
+    showReplayUncertain(message.payload?.message || 'Outcome uncertain');
     sendResponse({ success: true });
   }
 });
@@ -417,5 +600,37 @@ chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATE' }, (response) => {
     initializeRecorder();
     recorder?.start(response.stepCount || 0);
     showRecordingIndicator();
+  }
+});
+
+// Check if a replay session is active (e.g. following page navigation)
+chrome.runtime.sendMessage({ type: 'GET_REPLAY_STATUS' }, (response) => {
+  if (response && response.success && response.session) {
+    const session = response.session;
+    if (
+      session.status === 'RUNNING' ||
+      session.status === 'WAITING' ||
+      session.status === 'PAUSED' ||
+      session.status === 'NAVIGATING'
+    ) {
+      console.log(
+        `FlowOnce: Reconnecting HUD for active replay session ${session.sessionId} at step ${session.currentStepIndex + 1}`
+      );
+      showReplayIndicator(
+        session.currentStepIndex + 1,
+        session.totalSteps,
+        session.status,
+        session.workflowName
+      );
+      if (session.status === 'PAUSED' && replayIndicatorEl) {
+        replayIndicatorEl.dataset.isPaused = 'true';
+        const pauseBtn = replayIndicatorEl.querySelector('#flowonce-pause-replay-btn');
+        if (pauseBtn) pauseBtn.innerHTML = '▶️ Resume';
+        const statusEl = replayIndicatorEl.querySelector('#flowonce-step-status');
+        if (statusEl) statusEl.innerHTML = '(Paused)';
+      }
+    } else if (session.status === 'RECOVERY_REQUIRED') {
+      showReplayError(session.lastError || 'Session requires recovery attention');
+    }
   }
 });

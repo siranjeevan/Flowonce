@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { WorkflowStep, Workflow } from '../../shared/types/workflow';
-import { LocalStorageManager } from '../../workflow/storage/local-storage';
+import { WorkflowStorage } from '../../workflow/storage/WorkflowStorage';
 import { FirestoreStorageManager } from '../../workflow/storage/firestore-storage';
 import { Auth } from './Auth';
 import { WorkflowsList } from './WorkflowsList';
@@ -55,8 +55,7 @@ function App() {
     // Sync workflows saved locally from the content script modal up to the cloud
     const syncLocalWorkflows = async () => {
       try {
-        const data = await chrome.storage.local.get(['workflows']);
-        const localWorkflows = (data.workflows as Workflow[]) || [];
+        const localWorkflows = await WorkflowStorage.getAllWorkflows();
         
         if (localWorkflows.length > 0) {
           console.log(`Syncing ${localWorkflows.length} local workflows to cloud...`);
@@ -66,11 +65,8 @@ function App() {
             await FirestoreStorageManager.saveWorkflow(cloudWf);
           }
           // Clear the local workflows array after successful sync
-          await chrome.storage.local.set({ workflows: [] });
+          await WorkflowStorage.replaceAllWorkflows([]);
           showNotification(`Synced ${localWorkflows.length} offline workflow(s) to cloud!`, 'success');
-          
-          // If we are on the workflows tab, we should reload it. 
-          // We can just trust the WorkflowsList component to fetch them since it mounts/updates.
         }
       } catch (err) {
         console.error("Failed to sync local workflows to cloud:", err);
@@ -122,7 +118,7 @@ function App() {
       description: 'Recorded workflow',
       ownerId: user?.uid || 'local_user',
       version: 1,
-      schemaVersion: 1,
+      schemaVersion: 2,
       steps: [...steps],
       variables: [],
       createdAt: new Date().toISOString(),
@@ -130,8 +126,8 @@ function App() {
     };
     
     try {
-      // Save locally as a backup
-      await LocalStorageManager.saveWorkflow(workflow);
+      // Save locally via centralized WorkflowStorage
+      await WorkflowStorage.createWorkflow(workflow);
       
       // Save to Firestore
       if (user) {

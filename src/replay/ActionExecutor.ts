@@ -1,63 +1,304 @@
 import type { WorkflowStep } from '../shared/types/workflow';
+import { WaitManager } from './WaitManager';
 import { TargetResolver } from './TargetResolver';
+import { ActionVerifier } from './ActionVerifier';
+import { OutputExtractor } from './OutputExtractor';
+import type { VerificationResult } from './verification-types';
+
+export interface ExecutionOptions {
+  signal?: AbortSignal;
+  sessionId?: string;
+  workflowId?: string;
+  stepIndex?: number;
+  actionId?: string;
+}
+
+export interface ExecutionResult {
+  success: boolean;
+  verification: VerificationResult;
+  extractedValue?: { variableName: string; value: string | number | boolean | null };
+  error?: string;
+  code?: string;
+}
 
 export class ActionExecutor {
   
-  static async execute(step: WorkflowStep, speedMultiplier: number = 1): Promise<boolean> {
-    
+  static async execute(
+    step: WorkflowStep,
+    speedMultiplier: number = 1,
+    options?: ExecutionOptions
+  ): Promise<boolean> {
+    const result = await this.executeWithVerification(step, speedMultiplier, options);
+    if (!result.success) {
+      const err: any = new Error(result.error || 'Action execution or verification failed');
+      if (result.code) err.code = result.code;
+      throw err;
+    }
+    return true;
+  }
+
+  static async executeWithVerification(
+    step: WorkflowStep,
+    speedMultiplier: number = 1,
+    options?: ExecutionOptions
+  ): Promise<ExecutionResult> {
+    const startedAt = Date.now();
+    const actionId =
+      options?.actionId ||
+      `${options?.sessionId || 'sess'}_step${options?.stepIndex ?? step.sequence}_attempt0`;
+
+    // Extract step execution
+    if (step.type === 'extract') {
+      const extConfig = step.extraction || {
+        id: `ext_${step.id}`,
+        type: 'text_content',
+        variableName: step.value || 'extracted_val',
+        target: step.target,
+      };
+
+      const extResult = await OutputExtractor.extract(extConfig, {
+        signal: options?.signal,
+        sessionId: options?.sessionId,
+        workflowId: options?.workflowId,
+        stepIndex: options?.stepIndex,
+        isSensitive: step.sensitive,
+      });
+
+      const isSuccess = extResult.success || extConfig.onFailure === 'continue';
+      const verification: VerificationResult = {
+        verificationId: `VER_EXT_${Date.now()}`,
+        sessionId: options?.sessionId,
+        actionId,
+        actionType: 'extract',
+        status: isSuccess ? 'VERIFIED' : 'NOT_VERIFIED',
+        method: 'output_extraction',
+        startedAt,
+        completedAt: Date.now(),
+        elapsedMs: Date.now() - startedAt,
+        expectedCondition: `Extract ${extConfig.type} into "${extConfig.variableName}"`,
+        actualState: extResult.success ? `Value extracted: ${step.sensitive ? '••••••••' : String(extResult.value)}` : 'Extraction failed',
+        retryEligibility: 'NONE',
+        diagnosticInfo: extResult.diagnosticInfo,
+        error: extResult.error,
+      };
+
+      return {
+        success: isSuccess,
+        verification,
+        extractedValue: extResult.success
+          ? { variableName: extResult.variableName, value: extResult.value }
+          : undefined,
+        error: isSuccess ? undefined : extResult.error,
+      };
+    }
+
     // Video/Wait special cases without DOM targets
     if (step.type === 'wait') {
-      const waitMs = parseInt(step.value || '1000') / speedMultiplier;
-      await new Promise(res => setTimeout(res, waitMs));
-      return true;
+      const waitMs = parseInt(step.value || '1000', 10) / speedMultiplier;
+      await WaitManager.wait(waitMs, { signal: options?.signal });
+      const verification = await ActionVerifier.verifyAction(step, null, {
+        signal: options?.signal,
+        sessionId: options?.sessionId,
+        workflowId: options?.workflowId,
+        stepIndex: options?.stepIndex,
+        actionId,
+        initialUrl: typeof window !== 'undefined' ? window.location?.href : '',
+      });
+      return {
+        success: verification.status === 'VERIFIED',
+        verification,
+      };
     }
 
-    if (!step.target) return false;
-
-    let resolution = TargetResolver.resolve(step.target);
-    let el = resolution.element as HTMLElement;
-    let attempts = 0;
-
-    // Poll for the element to appear (up to 15 seconds)
-    while (!el && attempts < 75) {
-      await new Promise(res => setTimeout(res, 200));
-      resolution = TargetResolver.resolve(step.target);
-      el = resolution.element as HTMLElement;
-      attempts++;
+    if (!step.target && step.type !== 'scroll') {
+      const errorMsg = 'No target specified for action';
+      const verification: VerificationResult = {
+        verificationId: `VER_ERR_${Date.now()}`,
+        sessionId: options?.sessionId,
+        actionId,
+        actionType: step.type,
+        status: 'ERROR',
+        method: 'target_validation',
+        startedAt,
+        completedAt: Date.now(),
+        elapsedMs: Date.now() - startedAt,
+        expectedCondition: 'Target element specification',
+        actualState: 'Target is undefined',
+        retryEligibility: 'NONE',
+        error: errorMsg,
+      };
+      return {
+        success: false,
+        verification,
+        error: errorMsg,
+      };
     }
 
-    if (!el) {
+    let el: HTMLElement | null = null;
+    const initialUrl = typeof window !== 'undefined' ? window.location?.href : '';
+
+    try {
+      if (step.target) {
+        el = await WaitManager.waitForInteractable(step.target, step.type, {
+          signal: options?.signal,
+          sessionId: options?.sessionId,
+          workflowId: options?.workflowId,
+          stepIndex: options?.stepIndex,
+        });
+      }
+    } catch (err: unknown) {
       if (step.type === 'scroll') {
-        console.warn(`TARGET_NOT_FOUND for scroll. Falling back to window scroll.`);
+        console.warn(`[ActionExecutor] Target not found for scroll action. Falling back to window scroll.`);
         el = document.documentElement;
       } else {
-        const targetDesc = step.target.text ? `"${step.target.text}"` : (step.target.selector || step.target.id || step.target.name || 'element');
-        throw new Error(`Could not find ${targetDesc} after 15s`);
+        throw err;
       }
     }
 
-    // Ensure it's in view
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    
-    // Wait for scrolling to settle
-    await new Promise(res => setTimeout(res, 300 / speedMultiplier));
+    if (!el && step.type !== 'scroll') {
+      const targetDesc = step.target?.text
+        ? `"${step.target.text}"`
+        : step.target?.selector || step.target?.id || step.target?.name || 'element';
+      const errorMsg = `Could not find interactable ${targetDesc}`;
+      const verification: VerificationResult = {
+        verificationId: `VER_ERR_${Date.now()}`,
+        sessionId: options?.sessionId,
+        actionId,
+        actionType: step.type,
+        status: 'ERROR',
+        method: 'element_interactability_resolution',
+        startedAt,
+        completedAt: Date.now(),
+        elapsedMs: Date.now() - startedAt,
+        expectedCondition: `Interactable element ${targetDesc}`,
+        actualState: 'Element not interactable',
+        retryEligibility: 'NONE',
+        error: errorMsg,
+      };
+      return {
+        success: false,
+        verification,
+        error: errorMsg,
+      };
+    }
 
+    if (el) {
+      // Ensure it's in view
+      try {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } catch {}
+      
+      // Wait for scrolling to settle
+      try {
+        await WaitManager.waitForStableElement(el, { signal: options?.signal });
+      } catch {
+        // If stability wait times out or fails, proceed to revalidation
+      }
+
+      // Revalidate element staleness immediately before execution
+      if (!el.isConnected && step.target) {
+        console.warn(`[ActionExecutor] Element became detached during scroll. Re-resolving...`);
+        el = await WaitManager.waitForInteractable(step.target, step.type, {
+          signal: options?.signal,
+          sessionId: options?.sessionId,
+          workflowId: options?.workflowId,
+          stepIndex: options?.stepIndex,
+        });
+      }
+
+      // Pre-execution hit testing for click actions
+      if (step.type === 'click' && el) {
+        const hit = TargetResolver.checkHitTarget(el);
+        if (hit.isObstructed && step.target) {
+          console.warn(`[ActionExecutor] Element obstructed before click: ${hit.reason}. Re-waiting for unobstructed interaction...`);
+          el = await WaitManager.waitForInteractable(step.target, step.type, {
+            signal: options?.signal,
+            sessionId: options?.sessionId,
+            workflowId: options?.workflowId,
+            stepIndex: options?.stepIndex,
+            timeoutMs: 3000,
+          });
+        }
+      }
+    }
+
+    // Capture initial value before dispatching if input/textarea
+    let initialValue: string | undefined;
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      initialValue = el.value;
+    }
+
+    let dispatchSuccess = false;
     switch (step.type) {
       case 'click':
-        return this.executeClick(el);
+        dispatchSuccess = el ? this.executeClick(el) : false;
+        break;
       case 'input':
-        return this.executeInput(el, step.value || '');
+        dispatchSuccess = el ? this.executeInput(el, step.value || '') : false;
+        break;
       case 'keypress':
       case 'keydown':
-        return this.executeKeypress(el, step.key || '');
+        dispatchSuccess = el ? this.executeKeypress(el, step.key || '') : false;
+        break;
       case 'checkbox':
-        return this.executeCheckbox(el, step.value === 'true');
+        dispatchSuccess = el ? this.executeCheckbox(el, step.value === 'true') : false;
+        break;
+      case 'radio':
+        dispatchSuccess = el ? this.executeCheckbox(el, true) : false;
+        break;
+      case 'select':
+        dispatchSuccess = el ? this.executeSelect(el, step.value || '') : false;
+        break;
       case 'scroll':
-        return await this.executeScroll(el, step.position, speedMultiplier);
+        dispatchSuccess = await this.executeScroll(el || document.documentElement, step.position, speedMultiplier, options);
+        break;
       default:
         console.warn('Action not implemented yet:', step.type);
-        return true;
+        dispatchSuccess = true;
+        break;
     }
+
+    if (!dispatchSuccess) {
+      const errorMsg = `DOM dispatch failed for action ${step.type}`;
+      const verification: VerificationResult = {
+        verificationId: `VER_ERR_${Date.now()}`,
+        sessionId: options?.sessionId,
+        actionId,
+        actionType: step.type,
+        status: 'ERROR',
+        method: 'dom_dispatch',
+        startedAt,
+        completedAt: Date.now(),
+        elapsedMs: Date.now() - startedAt,
+        expectedCondition: `Action ${step.type} dispatched without error`,
+        actualState: 'DOM dispatch returned false',
+        retryEligibility: 'NONE',
+        error: errorMsg,
+      };
+      return {
+        success: false,
+        verification,
+        error: errorMsg,
+      };
+    }
+
+    // Evaluate verification postcondition
+    const verification = await ActionVerifier.verifyAction(step, el, {
+      signal: options?.signal,
+      sessionId: options?.sessionId,
+      workflowId: options?.workflowId,
+      stepIndex: options?.stepIndex,
+      actionId,
+      initialUrl,
+      initialValue,
+    });
+
+    const isVerified = verification.status === 'VERIFIED';
+    return {
+      success: isVerified,
+      verification,
+      error: isVerified ? undefined : (verification.diagnosticInfo || verification.recoveryRecommendation || verification.error),
+    };
   }
 
   private static executeClick(el: HTMLElement): boolean {
@@ -76,7 +317,6 @@ export class ActionExecutor {
     const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
     for (const eventType of events) {
       const event = new MouseEvent(eventType, {
-        view: window,
         bubbles: true,
         cancelable: true,
         buttons: eventType === 'pointerdown' || eventType === 'mousedown' ? 1 : 0
@@ -87,7 +327,6 @@ export class ActionExecutor {
     // If clickable parent is different, also dispatch click event directly to it
     if (clickable !== el) {
       const event = new MouseEvent('click', {
-        view: window,
         bubbles: true,
         cancelable: true,
         buttons: 0
@@ -152,40 +391,64 @@ export class ActionExecutor {
       bubbles: true,
       cancelable: true
     };
-    
+
     el.dispatchEvent(new KeyboardEvent('keydown', eventParams));
     el.dispatchEvent(new KeyboardEvent('keypress', eventParams));
     el.dispatchEvent(new KeyboardEvent('keyup', eventParams));
 
-    // Synthetic events don't trigger native form submission, so we do it manually
+    // Special case for Enter: if within a form, submit it
     if (key === 'Enter') {
       const form = el.closest('form');
       if (form) {
-        if (typeof form.requestSubmit === 'function') {
-          form.requestSubmit();
-        } else {
-          form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-        }
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       }
     }
-    
     return true;
   }
 
   private static executeCheckbox(el: HTMLElement, checked: boolean): boolean {
     if (el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')) {
+      el.focus();
       if (el.checked !== checked) {
-        el.click();
+        el.checked = checked;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
       }
       return true;
     }
     return false;
   }
 
-  private static async executeScroll(el: HTMLElement, position?: any, speedMultiplier: number = 1): Promise<boolean> {
-    if (!position || (position.scrollX === undefined && position.scrollY === undefined)) return false;
-    
-    // Always attempt window scroll
+  private static executeSelect(el: HTMLElement, value: string): boolean {
+    if (el instanceof HTMLSelectElement) {
+      el.focus();
+      let matched = false;
+      for (let i = 0; i < el.options.length; i++) {
+        if (el.options[i].value === value || el.options[i].text.trim() === value.trim()) {
+          el.selectedIndex = i;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) {
+        el.value = value;
+      }
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    }
+    return false;
+  }
+
+  private static async executeScroll(
+    el: HTMLElement,
+    position?: { scrollX?: number; scrollY?: number },
+    speedMultiplier: number = 1,
+    options?: ExecutionOptions
+  ): Promise<boolean> {
+    if (!position) return false;
+
+    // First attempt to scroll the main window
     window.scrollTo({
       left: position.scrollX || 0,
       top: position.scrollY || 0,
@@ -202,20 +465,15 @@ export class ActionExecutor {
         });
         el.scrollLeft = position.scrollX || 0;
         el.scrollTop = position.scrollY || 0;
-      } catch (e) {}
+      } catch {}
     } else {
-      // If we fell back to window (or the target was window), let's ALSO scroll any major scrollable container
-      // This fixes virtualization issues on SPAs (like Meesho) where the main body isn't the true scroll container
+      // If we fell back to window, also scroll any major scrollable container
       const scrollables = Array.from(document.querySelectorAll('*')).filter(e => {
         if (e === document.documentElement || e === document.body) return false;
         const style = window.getComputedStyle(e);
         return (style.overflowY === 'auto' || style.overflowY === 'scroll') && e.scrollHeight > e.clientHeight;
       });
-      
-      // Sort by size (largest scrollable areas first)
       scrollables.sort((a, b) => (b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight));
-      
-      // Apply the scroll to the top 3 largest scrollable areas
       scrollables.slice(0, 3).forEach(s => {
         s.scrollLeft = position.scrollX || 0;
         s.scrollTop = position.scrollY || 0;
@@ -223,7 +481,7 @@ export class ActionExecutor {
     }
 
     // Wait for scroll to settle
-    await new Promise(res => setTimeout(res, 300 / speedMultiplier));
+    await WaitManager.wait(Math.max(50, 200 / speedMultiplier), { signal: options?.signal });
     return true;
   }
 }

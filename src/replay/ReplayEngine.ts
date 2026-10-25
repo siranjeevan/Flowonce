@@ -1,5 +1,6 @@
 import type { Workflow, WorkflowStep } from '../shared/types/workflow';
 import { ActionExecutor } from './ActionExecutor';
+import { WaitManager } from './WaitManager';
 
 export interface ReplayState {
   currentStepIndex: number;
@@ -47,9 +48,8 @@ export class ReplayEngine {
       while (this.state.currentStepIndex < this.workflow.steps.length && this.state.isRunning) {
         const step = this.workflow.steps[this.state.currentStepIndex];
         
-        // Wait strategy: Simple wait for now before each action to ensure DOM changes settle.
-        // Can be replaced with MutationObserver logic.
-        await new Promise(r => setTimeout(r, 800));
+        // Synchronization handled conditionally inside ActionExecutor via WaitManager
+        await WaitManager.wait(50);
 
         // Inject variables
         const preparedStep = this.prepareStepVariables(step);
