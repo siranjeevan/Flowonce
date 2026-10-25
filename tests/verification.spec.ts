@@ -152,7 +152,7 @@ test.describe('Phase 6: Real-Browser Action Verification & Postcondition Engine'
     expect(clicks).toBe('1');
 
     // Confirm that because outcome was uncertain, a repeat dispatch is prevented
-    const secondClick = await page.waitForSelector('#payment-confirmed', { timeout: 500 }).catch(e => null);
+    const secondClick = await page.waitForSelector('#payment-confirmed', { timeout: 500 }).catch(() => null);
     expect(secondClick).toBeNull();
     // Counter stays at 1
     expect(await page.innerText('#click-counter')).toBe('1');

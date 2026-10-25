@@ -32,6 +32,18 @@ export const STORAGE_KEYS = {
   SESSION_SCHEMA_VERSION: 'flowonce.sessionSchemaVersion',
   /** Historical archived sessions */
   SESSION_HISTORY: 'flowonce.replaySessionHistory',
+  /** Reusable workflow components */
+  COMPONENTS: 'flowonce.components',
+  /** User-defined and cached templates */
+  TEMPLATES: 'flowonce.templates',
+  /** Scheduled workflow automation */
+  SCHEDULES: 'flowonce.schedules',
+  /** Safe API integrations configuration */
+  INTEGRATIONS: 'flowonce.integrations',
+  /** Workflow execution analytics and run history */
+  EXECUTION_HISTORY: 'flowonce.executionHistory',
+  /** Team collaboration and sharing permissions */
+  COLLABORATION: 'flowonce.collaboration',
 } as const;
 
 export const LEGACY_STORAGE_KEYS = {

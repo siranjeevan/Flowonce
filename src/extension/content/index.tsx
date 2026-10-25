@@ -1,6 +1,8 @@
 import { Recorder } from '../../recorder/event-capture';
 import type { WorkflowStep } from '../../shared/types/workflow';
 import { ActionExecutor } from '../../replay/ActionExecutor';
+import { ActionVerifier, classifyActionSafety } from '../../replay/ActionVerifier';
+import { TargetResolver } from '../../replay/TargetResolver';
 
 console.log("FlowOnce Content Script injected.");
 
@@ -270,7 +272,13 @@ function showCaptureFeedback(actionType: string) {
   }, 1200);
 }
 
-function showReplayIndicator(stepIndex: number, totalSteps: number, stepType: string, stepValue: string) {
+function showReplayIndicator(
+  stepIndex: number,
+  totalSteps: number,
+  stepType: string,
+  stepValue: string,
+  datasetInfo?: { recordIndex: number; totalRecords: number }
+) {
   if (!replayIndicatorEl) {
     replayIndicatorEl = document.createElement('div');
     replayIndicatorEl.id = 'flowonce-replay-indicator';
@@ -300,6 +308,10 @@ function showReplayIndicator(stepIndex: number, totalSteps: number, stepType: st
     replayIndicatorEl.style.border = '1px solid rgba(249, 223, 159, 0.2)';
     replayIndicatorEl.style.pointerEvents = 'auto';
   }
+
+  const prefix = datasetInfo
+    ? `Record ${datasetInfo.recordIndex}/${datasetInfo.totalRecords} • Step ${stepIndex}/${totalSteps}`
+    : `Running Step ${stepIndex}/${totalSteps}`;
   
   replayIndicatorEl.innerHTML = `
     <div style="display: flex; align-items: center; gap: 12px;">
@@ -307,7 +319,7 @@ function showReplayIndicator(stepIndex: number, totalSteps: number, stepType: st
         <circle style="opacity: 0.25;" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
         <path style="opacity: 0.75;" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
       </svg>
-      <span style="font-size: 14px; font-weight: 600; color: #F9DF9F; letter-spacing: 0.5px;">Running Step ${stepIndex}/${totalSteps}</span>
+      <span style="font-size: 14px; font-weight: 600; color: #F9DF9F; letter-spacing: 0.5px;">${prefix}</span>
       <span id="flowonce-step-status" style="font-size: 12px; font-weight: 500; opacity: 0.9; background: #1A2240; padding: 3px 10px; border-radius: 6px; border: 1px solid rgba(205, 228, 230, 0.15); max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
         <span style="color: #CDE4E6; font-weight: 700; margin-right: 4px;">${stepType.toUpperCase()}</span> ${stepValue}
       </span>
@@ -417,33 +429,142 @@ function showReplayError(errorMessage: string) {
   }
 }
 
-function showReplayUncertain(message: string) {
+function showRecoveryHUD(session?: any, step?: WorkflowStep, message?: string) {
   if (!replayIndicatorEl) {
-    showReplayIndicator(0, 0, 'Action', 'Uncertain');
+    showReplayIndicator(0, 0, 'Recovery', 'Required');
   }
 
   if (replayIndicatorEl) {
     replayIndicatorEl.style.border = '1px solid rgba(250, 173, 20, 0.8)';
+    replayIndicatorEl.style.maxWidth = '560px';
+    replayIndicatorEl.style.width = 'auto';
     replayIndicatorEl.style.pointerEvents = 'auto';
+
+    const stepIndex = session ? session.currentStepIndex + 1 : (step?.sequence ?? 1);
+    const actionType = step?.type?.toUpperCase() || 'ACTION';
+    const safety = step ? classifyActionSafety(step) : 'EXTERNAL_SIDE_EFFECT';
+    const isUnsafe = safety === 'EXTERNAL_SIDE_EFFECT' || safety === 'TOGGLE_STATE';
+    const stepDetail = step?.sensitive
+      ? '••••••••'
+      : (step?.value || step?.key || (step?.target?.text ? `"${step.target.text}"` : step?.target?.selector) || '');
+    const reasonText = message || session?.lastError || 'Action outcome could not be verified automatically.';
+
+    const datasetBadge = session?.datasetState
+      ? `<span style="background: rgba(250, 173, 20, 0.2); color: #ffe58f; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-left: 6px;">Record ${session.datasetState.currentRecordIndex + 1}/${session.datasetState.totalRecords}</span>`
+      : '';
+
+    const safetyBadge = isUnsafe
+      ? `<span style="background: rgba(255, 77, 79, 0.2); color: #ff7875; border: 1px solid rgba(255, 77, 79, 0.4); padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700;">SIDE EFFECT</span>`
+      : `<span style="background: rgba(82, 196, 26, 0.2); color: #95de64; border: 1px solid rgba(82, 196, 26, 0.4); padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700;">IDEMPOTENT</span>`;
+
     replayIndicatorEl.innerHTML = `
-      <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
-        <span style="font-size: 16px;">⚠️</span>
-        <span style="font-size: 13px; font-weight: 700; color: #faad14; letter-spacing: 0.5px;">Outcome Uncertain</span>
-        <span style="user-select: text; cursor: text; font-size: 12px; font-weight: 500; opacity: 0.95; background: rgba(250, 173, 20, 0.12); padding: 5px 12px; border-radius: 6px; border: 1px solid rgba(250, 173, 20, 0.3); max-width: 400px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #ffe58f;" title="${message.replace(/"/g, '&quot;')}">
-          ${message}
-        </span>
-        <button id="flowonce-resume-advance-btn" style="background: rgba(250, 173, 20, 0.2); border: 1px solid rgba(250, 173, 20, 0.5); color: #faad14; border-radius: 4px; padding: 4px 10px; font-size: 11px; font-weight: bold; cursor: pointer; transition: all 0.2s;">Resume Next Step</button>
-        <button id="flowonce-stop-uncertain-btn" style="background: rgba(255, 77, 79, 0.15); border: 1px solid rgba(255, 77, 79, 0.4); color: #ff4d4f; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: bold; cursor: pointer; transition: all 0.2s;">Stop</button>
-        <button id="flowonce-close-uncertain-btn" style="background: transparent; border: none; color: rgba(255,255,255,0.6); font-size: 14px; cursor: pointer; padding: 2px 6px; line-height: 1;">✕</button>
+      <div style="display: flex; flex-direction: column; gap: 8px; width: 100%;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <span style="font-size: 15px;">⚠️</span>
+            <span style="font-size: 13px; font-weight: 700; color: #faad14;">Recovery Required • Step ${stepIndex}</span>
+            ${datasetBadge}
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            ${safetyBadge}
+            <button id="flowonce-close-uncertain-btn" style="background: transparent; border: none; color: rgba(255,255,255,0.6); font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1;">✕</button>
+          </div>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px;">
+          <span style="color: #F9DF9F; font-weight: 600;">${actionType}</span>
+          <span style="color: #CDE4E6; opacity: 0.9; max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${stepDetail}</span>
+        </div>
+
+        <div id="flowonce-recovery-reason" style="font-size: 11px; color: #ffe58f; background: rgba(250, 173, 20, 0.1); padding: 5px 8px; border-radius: 4px; border: 1px solid rgba(250, 173, 20, 0.2); line-height: 1.4;">
+          ${reasonText}
+        </div>
+
+        ${isUnsafe ? `
+          <div style="font-size: 10px; color: #ff7875; display: flex; align-items: center; gap: 4px;">
+            <span>⚠️</span> Repeating this action may trigger duplicate external side effects.
+          </div>
+        ` : ''}
+
+        <div id="flowonce-inspection-result" style="display: none; font-size: 11px; background: rgba(26, 34, 64, 0.9); padding: 6px 8px; border-radius: 4px; border: 1px solid rgba(205, 228, 230, 0.2); color: #CDE4E6;"></div>
+
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px;">
+          <button id="flowonce-inspect-page-btn" style="background: rgba(205, 228, 230, 0.15); border: 1px solid rgba(205, 228, 230, 0.3); color: #CDE4E6; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: 600; cursor: pointer;">
+            🔍 Inspect Page
+          </button>
+          <button id="flowonce-recheck-condition-btn" style="background: rgba(99, 102, 241, 0.2); border: 1px solid rgba(99, 102, 241, 0.4); color: #a5b4fc; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: 600; cursor: pointer;">
+            🔄 Recheck
+          </button>
+          <button id="flowonce-resume-advance-btn" style="background: rgba(82, 196, 26, 0.2); border: 1px solid rgba(82, 196, 26, 0.5); color: #95de64; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: 700; cursor: pointer;">
+            ✅ Confirm Success
+          </button>
+          <button id="flowonce-retry-action-btn" style="background: rgba(250, 173, 20, 0.2); border: 1px solid rgba(250, 173, 20, 0.5); color: #faad14; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: 600; cursor: pointer;">
+            🔁 Retry
+          </button>
+          <button id="flowonce-stop-uncertain-btn" style="background: rgba(255, 77, 79, 0.15); border: 1px solid rgba(255, 77, 79, 0.4); color: #ff4d4f; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: 600; cursor: pointer; margin-left: auto;">
+            ⏹ Stop
+          </button>
+        </div>
       </div>
     `;
+
+    const inspectBtn = document.getElementById('flowonce-inspect-page-btn');
+    if (inspectBtn) {
+      inspectBtn.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ type: 'RECOVERY_INSPECT_PAGE' }, (resp) => {
+          const resEl = document.getElementById('flowonce-inspection-result');
+          if (resEl && resp && resp.inspection) {
+            resEl.style.display = 'block';
+            resEl.innerHTML = `<strong>Page:</strong> ${resp.inspection.url || 'unknown'}<br/><strong>Target in DOM:</strong> ${resp.inspection.targetFound ? '✅ Yes' : '❌ No'}`;
+          }
+        });
+      });
+    }
+
+    const recheckBtn = document.getElementById('flowonce-recheck-condition-btn');
+    if (recheckBtn) {
+      recheckBtn.addEventListener('click', () => {
+        recheckBtn.innerText = 'Checking...';
+        chrome.runtime.sendMessage({ type: 'RECOVERY_RECHECK_CONDITION' }, (resp) => {
+          recheckBtn.innerText = '🔄 Recheck';
+          const reasonEl = document.getElementById('flowonce-recovery-reason');
+          if (reasonEl && resp) {
+            if (resp.verification?.status === 'VERIFIED') {
+              reasonEl.style.borderColor = 'rgba(82, 196, 26, 0.6)';
+              reasonEl.style.color = '#95de64';
+              reasonEl.innerHTML = '✅ Postcondition verified! Click <strong>Confirm Success</strong> to continue.';
+            } else {
+              reasonEl.innerHTML = `Recheck: ${resp.verification?.status || 'Inconclusive'}. Still uncertain.`;
+            }
+          }
+        });
+      });
+    }
 
     const advanceBtn = document.getElementById('flowonce-resume-advance-btn');
     if (advanceBtn) {
       advanceBtn.addEventListener('click', () => {
+        hideReplayIndicator();
         chrome.runtime.sendMessage({
-          type: 'RESUME_WORKFLOW',
+          type: 'RECOVERY_CONFIRM_SUCCESS',
           payload: { forceAdvance: true },
+        });
+      });
+    }
+
+    const retryBtn = document.getElementById('flowonce-retry-action-btn');
+    if (retryBtn) {
+      retryBtn.addEventListener('click', () => {
+        if (isUnsafe) {
+          const proceed = window.confirm(
+            '⚠️ WARNING: This action has external side effects (e.g. submit/click). Retrying may create duplicate actions. Are you sure you want to proceed?'
+          );
+          if (!proceed) return;
+        }
+        hideReplayIndicator();
+        chrome.runtime.sendMessage({
+          type: 'RECOVERY_CONFIRM_FAILURE_RETRY',
+          payload: { forceUnsafeRetry: true },
         });
       });
     }
@@ -461,6 +582,10 @@ function showReplayUncertain(message: string) {
       closeBtn.addEventListener('click', () => hideReplayIndicator());
     }
   }
+}
+
+function showReplayUncertain(message: string) {
+  showRecoveryHUD(undefined, undefined, message);
 }
 
 // Initialize recorder and handle messages from background/popup
@@ -506,7 +631,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     activeStepAbortController = new AbortController();
 
-    const { step, speedMultiplier, index, total, sessionId, actionId } = message.payload;
+    const { step, speedMultiplier, index, total, sessionId, actionId, datasetInfo } = message.payload;
 
     // Idempotency check: prevent duplicate execution of already-executed action
     if (actionId && executedActionIds.has(actionId)) {
@@ -518,7 +643,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // Extract a descriptive detail for the step
     const stepDetail = step.sensitive ? '••••••••' : (step.value || step.key || (step.target?.text ? `"${step.target.text}"` : step.target?.selector) || '');
     if (index && total) {
-      showReplayIndicator(index, total, step.type, stepDetail);
+      showReplayIndicator(index, total, step.type, stepDetail, datasetInfo);
     }
     
     ActionExecutor.executeWithVerification(step, speedMultiplier, {
@@ -590,6 +715,61 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     showReplayUncertain(message.payload?.message || 'Outcome uncertain');
     sendResponse({ success: true });
+  } else if (message.type === 'SHOW_RECOVERY_HUD') {
+    if (activeStepAbortController) {
+      activeStepAbortController.abort();
+      activeStepAbortController = null;
+    }
+    showRecoveryHUD(message.payload?.session, message.payload?.step, message.payload?.message);
+    sendResponse({ success: true });
+  } else if (message.type === 'RECHECK_STEP_CONDITION') {
+    const { step, sessionId, actionId, stepIndex } = message.payload || {};
+    ActionVerifier.verifyAction(step, null, {
+      sessionId,
+      stepIndex,
+      actionId,
+    })
+      .then((verification) => {
+        sendResponse({ success: true, verification });
+      })
+      .catch((err) => {
+        sendResponse({
+          success: false,
+          error: err instanceof Error ? err.message : 'Recheck failed',
+        });
+      });
+    return true; // async
+  } else if (message.type === 'INSPECT_PAGE_STATE') {
+    const step = message.payload?.step;
+    let targetFound = false;
+    let targetDetails: any = null;
+
+    if (step?.target) {
+      try {
+        const res = TargetResolver.resolve(step.target);
+        if (res && res.element) {
+          targetFound = true;
+          targetDetails = {
+            tagName: res.element.tagName,
+            text: (res.element.innerText || '').slice(0, 100).trim(),
+            confidence: res.confidence,
+            isAmbiguous: res.isAmbiguous,
+          };
+        }
+      } catch {
+        targetFound = false;
+      }
+    }
+
+    sendResponse({
+      success: true,
+      url: window.location.href,
+      title: document.title,
+      targetFound,
+      targetDetails,
+      readyState: document.readyState,
+    });
+    return false;
   }
 });
 
@@ -630,7 +810,7 @@ chrome.runtime.sendMessage({ type: 'GET_REPLAY_STATUS' }, (response) => {
         if (statusEl) statusEl.innerHTML = '(Paused)';
       }
     } else if (session.status === 'RECOVERY_REQUIRED') {
-      showReplayError(session.lastError || 'Session requires recovery attention');
+      showRecoveryHUD(session, undefined, session.lastError);
     }
   }
 });

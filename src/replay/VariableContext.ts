@@ -45,6 +45,14 @@ export type RuntimeVariableValue = string | number | boolean | null;
  * 4. User inputs (runtime values provided when launching replay)
  * 5. Workflow defaults (declared in workflow.variables with defaultValue)
  */
+export interface VariableContextOptions {
+  declarations?: WorkflowVariable[];
+  workflowDefaults?: Record<string, unknown>;
+  userInputs?: Record<string, unknown>;
+  recordData?: Record<string, unknown>;
+  systemVariables?: Record<string, unknown>;
+}
+
 export class VariableContext {
   private systemVars: Map<string, RuntimeVariableValue> = new Map();
   private extractedVars: Map<string, RuntimeVariableValue> = new Map();
@@ -54,22 +62,43 @@ export class VariableContext {
   private declarations: Map<string, WorkflowVariable> = new Map();
 
   constructor(
-    declarations: WorkflowVariable[] = [],
+    declarationsOrOptions: WorkflowVariable[] | VariableContextOptions = [],
     userInputs: Record<string, unknown> = {},
     datasetRecord: Record<string, unknown> = {},
     systemInputs: Record<string, unknown> = {}
   ) {
+    let declarations: WorkflowVariable[] = [];
+    let uInputs: Record<string, unknown> = userInputs;
+    let dRecord: Record<string, unknown> = datasetRecord;
+    let sInputs: Record<string, unknown> = systemInputs;
+
+    if (!Array.isArray(declarationsOrOptions)) {
+      declarations = declarationsOrOptions.declarations || [];
+      uInputs = declarationsOrOptions.userInputs || {};
+      dRecord = declarationsOrOptions.recordData || {};
+      sInputs = declarationsOrOptions.systemVariables || {};
+      if (declarationsOrOptions.workflowDefaults) {
+        for (const [key, val] of Object.entries(declarationsOrOptions.workflowDefaults)) {
+          if (val !== undefined) {
+            this.defaultVars.set(key, val as RuntimeVariableValue);
+          }
+        }
+      }
+    } else {
+      declarations = declarationsOrOptions;
+    }
+
     // 1. Register declarations and default values
     for (const decl of declarations) {
       this.validateVariableName(decl.name);
       this.declarations.set(decl.name, { ...decl });
-      if (decl.defaultValue !== undefined) {
+      if (decl.defaultValue !== undefined && !this.defaultVars.has(decl.name)) {
         this.defaultVars.set(decl.name, this.coerceValue(decl.defaultValue, decl.type));
       }
     }
 
     // 2. Register user inputs
-    for (const [key, val] of Object.entries(userInputs)) {
+    for (const [key, val] of Object.entries(uInputs)) {
       if (val !== undefined) {
         const decl = this.declarations.get(key);
         this.userVars.set(key, this.coerceValue(val, decl?.type));
@@ -77,7 +106,7 @@ export class VariableContext {
     }
 
     // 3. Register dataset record values
-    for (const [key, val] of Object.entries(datasetRecord)) {
+    for (const [key, val] of Object.entries(dRecord)) {
       if (val !== undefined) {
         const decl = this.declarations.get(key);
         this.datasetVars.set(key, this.coerceValue(val, decl?.type));
@@ -85,9 +114,12 @@ export class VariableContext {
     }
 
     // 4. Register system variables
-    for (const [key, val] of Object.entries(systemInputs)) {
+    for (const [key, val] of Object.entries(sInputs)) {
       this.systemVars.set(key, this.coerceValue(val));
     }
+
+    // 5. Enforce required variable presence
+    this.validateRequiredVariables();
   }
 
   /**
@@ -97,8 +129,8 @@ export class VariableContext {
     if (!name || typeof name !== 'string') {
       throw new VariableValidationError('Variable name must be a non-empty string');
     }
-    if (name.startsWith('_') && !RESERVED_SYSTEM_VARS.has(name)) {
-      throw new VariableValidationError(`Variable name "${name}" cannot start with an underscore (reserved for system variables)`);
+    if (name.startsWith('_') || RESERVED_SYSTEM_VARS.has(name)) {
+      throw new VariableValidationError(`Variable name "${name}" is reserved for system variables`);
     }
   }
 
@@ -218,7 +250,7 @@ export class VariableContext {
   ): string {
     if (!template || typeof template !== 'string') return template;
 
-    return template.replace(/{{([a-zA-Z0-9_]+)}}/g, (match, varName) => {
+    return template.replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (match, varName) => {
       const val = this.get(varName);
 
       if (val === undefined) {
@@ -282,35 +314,50 @@ export class VariableContext {
     datasetVars: Record<string, RuntimeVariableValue>;
     extractedVars: Record<string, RuntimeVariableValue>;
     systemVars: Record<string, RuntimeVariableValue>;
+    extractedVariables: Record<string, RuntimeVariableValue>;
+    recordData: Record<string, RuntimeVariableValue>;
   } {
+    const user = Object.fromEntries(this.userVars.entries());
+    const dataset = Object.fromEntries(this.datasetVars.entries());
+    const extracted = Object.fromEntries(this.extractedVars.entries());
+    const system = Object.fromEntries(this.systemVars.entries());
     return {
       declarations: Array.from(this.declarations.values()),
-      userVars: Object.fromEntries(this.userVars.entries()),
-      datasetVars: Object.fromEntries(this.datasetVars.entries()),
-      extractedVars: Object.fromEntries(this.extractedVars.entries()),
-      systemVars: Object.fromEntries(this.systemVars.entries()),
+      userVars: user,
+      datasetVars: dataset,
+      extractedVars: extracted,
+      systemVars: system,
+      extractedVariables: extracted,
+      recordData: dataset,
     };
   }
 
   /**
    * Reconstructs a VariableContext from persisted data.
    */
-  public static fromSerializable(data: {
-    declarations?: WorkflowVariable[];
-    userVars?: Record<string, unknown>;
-    datasetVars?: Record<string, unknown>;
-    extractedVars?: Record<string, unknown>;
-    systemVars?: Record<string, unknown>;
-  }): VariableContext {
+  public static fromSerializable(
+    data: {
+      declarations?: WorkflowVariable[];
+      userVars?: Record<string, unknown>;
+      datasetVars?: Record<string, unknown>;
+      recordData?: Record<string, unknown>;
+      extractedVars?: Record<string, unknown>;
+      extractedVariables?: Record<string, unknown>;
+      systemVars?: Record<string, unknown>;
+    },
+    workflowDeclarations?: WorkflowVariable[]
+  ): VariableContext {
+    const decls = workflowDeclarations || data.declarations || [];
     const ctx = new VariableContext(
-      data.declarations || [],
+      decls,
       data.userVars || {},
-      data.datasetVars || {},
+      data.datasetVars || data.recordData || {},
       data.systemVars || {}
     );
 
-    if (data.extractedVars) {
-      for (const [k, v] of Object.entries(data.extractedVars)) {
+    const ext = data.extractedVars || data.extractedVariables;
+    if (ext) {
+      for (const [k, v] of Object.entries(ext)) {
         ctx.extractedVars.set(k, ctx.coerceValue(v));
       }
     }

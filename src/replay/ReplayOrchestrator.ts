@@ -4,11 +4,20 @@ import { WaitError } from './timeout-config';
 import { WorkflowStorage } from '../workflow/storage/WorkflowStorage';
 import { CURRENT_SESSION_SCHEMA_VERSION } from '../workflow/storage/storage-keys';
 import { ReplaySessionStorage } from './session/ReplaySessionStorage';
-import type { ReplaySession, DatasetExecutionState } from './session/session-types';
-import { VariableContext, MissingRequiredVariableError } from './VariableContext';
+import type {
+  ReplaySession,
+  DatasetExecutionState,
+  RecoveryEvidence,
+  RecoveryDecision,
+} from './session/session-types';
+import { VariableContext } from './VariableContext';
 import { DatasetParser, type ParsedDataset } from './dataset/DatasetParser';
 import { ConditionEvaluator } from './ConditionEvaluator';
 import type { VerificationResult } from './verification-types';
+import { isSafeUrl } from '../workflow/storage/schema';
+import { classifyActionSafety } from './ActionVerifier';
+import { ExecutionHistoryManager } from '../automation/history/ExecutionHistoryManager';
+import type { FailureCategory } from '../automation/history/history-types';
 
 export class ReplayOrchestrator {
   private activeSession: ReplaySession | null = null;
@@ -33,6 +42,39 @@ export class ReplayOrchestrator {
     if (this.abortController?.signal.aborted) return true;
     const status = this.activeSession.status as string;
     return status === 'PAUSED' || status === 'CANCELLED';
+  }
+
+  private recordExecutionHistory(
+    status: 'SUCCESS' | 'FAILED' | 'RECOVERY_REQUIRED' | 'CANCELLED',
+    failureCategory: FailureCategory = 'NONE',
+    failureReason?: string
+  ): void {
+    if (!this.activeSession) return;
+    const now = Date.now();
+    const durationMs = Math.max(0, now - (this.activeSession.startedAt || now));
+    const currentStep = this.workflow?.steps?.[this.activeSession.currentStepIndex];
+
+    ExecutionHistoryManager.recordEntry({
+      id: `HIST_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      sessionId: this.activeSession.sessionId,
+      workflowId: this.activeSession.workflowId,
+      workflowName: this.activeSession.workflowName,
+      status,
+      startTime: this.activeSession.startedAt || now,
+      endTime: now,
+      durationMs,
+      totalSteps: this.activeSession.totalSteps,
+      executedSteps: this.activeSession.stepExecutionCount || this.activeSession.currentStepIndex,
+      verifiedSteps: this.stepVerifications.size,
+      failedStepId: currentStep?.id,
+      failureCategory,
+      failureReason: failureReason || this.activeSession.lastError || undefined,
+      recoveryAttempts: this.activeSession.attemptCount || 0,
+      datasetRecordIndex: this.activeSession.datasetState?.currentRecordIndex,
+      datasetTotalRecords: this.activeSession.datasetState?.totalRecords,
+    }).catch((err) => {
+      console.warn('[ReplayOrchestrator] Failed to record execution history:', err);
+    });
   }
 
   /**
@@ -113,6 +155,8 @@ export class ReplayOrchestrator {
         completedRecords: [],
         failedRecords: [],
         skippedRecords: [],
+        records: dataset.records,
+        hasUnsafeActionExecutedInCurrentRecord: false,
       };
     }
 
@@ -135,6 +179,7 @@ export class ReplayOrchestrator {
       extractedVariables: {},
       datasetState,
       stepExecutionCount: 0,
+      totalStepExecutionCount: 0,
       maxStepBudget: workflow.settings?.maxStepBudget || 500,
       navigationPending: false,
       cancellationRequested: false,
@@ -269,6 +314,15 @@ export class ReplayOrchestrator {
         const wf = await WorkflowStorage.getWorkflowById(persisted.workflowId);
         if (wf) this.workflow = wf;
         this.activeSession = persisted;
+        this.activeSessionId = persisted.sessionId;
+        if (persisted.datasetState?.records && persisted.datasetState.records.length > 0) {
+          this.activeDataset = {
+            records: persisted.datasetState.records,
+            columns: Object.keys(persisted.datasetState.records[0] || {}),
+            rowCount: persisted.datasetState.records.length,
+            fingerprint: persisted.datasetState.fingerprint,
+          };
+        }
         ReplaySessionStorage.appendEvent(
           persisted,
           'SESSION_RESTORED',
@@ -287,6 +341,15 @@ export class ReplayOrchestrator {
         const wf = await WorkflowStorage.getWorkflowById(persisted.workflowId);
         if (wf) this.workflow = wf;
         this.activeSession = persisted;
+        this.activeSessionId = persisted.sessionId;
+        if (persisted.datasetState?.records && persisted.datasetState.records.length > 0) {
+          this.activeDataset = {
+            records: persisted.datasetState.records,
+            columns: Object.keys(persisted.datasetState.records[0] || {}),
+            rowCount: persisted.datasetState.records.length,
+            fingerprint: persisted.datasetState.fingerprint,
+          };
+        }
         ReplaySessionStorage.appendEvent(
           persisted,
           'SESSION_RESTORED',
@@ -295,6 +358,25 @@ export class ReplayOrchestrator {
         await ReplaySessionStorage.saveSession(persisted);
         this.broadcastStatusChange();
         return;
+      }
+
+      // Checkpoint 4: Service worker terminated after verification but before advancing step
+      if (persisted.actionState === 'VERIFIED') {
+        console.log(
+          `[ReplayOrchestrator] Action was verified before restart. Advancing step ${persisted.currentStepIndex + 1}.`
+        );
+        persisted.lastCompletedStepIndex = persisted.currentStepIndex;
+        persisted.currentStepIndex++;
+        persisted.actionState = 'NOT_STARTED';
+        persisted.currentActionId = null;
+        persisted.attemptCount = 0;
+        persisted.status = 'WAITING';
+        ReplaySessionStorage.appendEvent(
+          persisted,
+          'STEP_CHECKPOINT_SAVED',
+          'Advanced verified step after service worker restart'
+        );
+        await ReplaySessionStorage.saveSession(persisted);
       }
 
       // Check uncertain action dispatch or verification in progress
@@ -339,6 +421,33 @@ export class ReplayOrchestrator {
           persisted.actionState = 'OUTCOME_UNKNOWN';
           persisted.lastError =
             'Service worker restarted while action was dispatching. Action outcome is uncertain.';
+
+          const wf = await WorkflowStorage.getWorkflowById(persisted.workflowId);
+          const currentStep = wf?.steps[persisted.currentStepIndex];
+          const safety = currentStep ? classifyActionSafety(currentStep) : 'EXTERNAL_SIDE_EFFECT';
+          if (!persisted.recoveryContext) {
+            persisted.recoveryContext = {
+              interruptedStepIndex: persisted.currentStepIndex,
+              interruptedActionId: persisted.currentActionId || '',
+              safetyCategory: safety,
+              reason: persisted.lastError,
+              evidence: [
+                {
+                  id: `EVD_${Date.now()}_boot`,
+                  type: 'inconclusive',
+                  timestamp: Date.now(),
+                  stepIndex: persisted.currentStepIndex,
+                  actionId: persisted.currentActionId || '',
+                  result: 'UNCERTAIN',
+                  description: 'Service worker restarted while action was in flight. Outcome uncertain.',
+                  source: 'AUTOMATED_CHECK',
+                  isUserProvided: false,
+                },
+              ],
+              history: [],
+            };
+          }
+
           ReplaySessionStorage.appendEvent(
             persisted,
             'SESSION_RECOVERY_REQUIRED',
@@ -382,6 +491,22 @@ export class ReplayOrchestrator {
           },
         });
         this.variableContext = this.baseVariableContext;
+      }
+
+      // Restore active dataset if persisted in session
+      if (persisted.datasetState && persisted.datasetState.records) {
+        this.activeDataset = {
+          records: persisted.datasetState.records,
+          columns: Object.keys(persisted.datasetState.records[0] || {}),
+          rowCount: persisted.datasetState.records.length,
+          fingerprint: persisted.datasetState.fingerprint,
+        };
+
+        const recIdx = persisted.datasetState.currentRecordIndex;
+        const rec = this.activeDataset.records[recIdx];
+        if (rec && this.baseVariableContext) {
+          this.variableContext = this.baseVariableContext.createRecordContext(rec, recIdx);
+        }
       }
 
       ReplaySessionStorage.appendEvent(
@@ -478,10 +603,16 @@ export class ReplayOrchestrator {
   /**
    * Stops and cancels the active replay session. Idempotent.
    */
-  public async stop(sessionId?: string): Promise<boolean> {
+  public async stop(
+    sessionId?: string,
+    options?: { sessionRevision?: number; rationale?: string }
+  ): Promise<boolean> {
     const session = this.activeSession || (await ReplaySessionStorage.getActiveSession());
     if (!session) return true;
     if (sessionId && session.sessionId !== sessionId) return false;
+    if (options?.sessionRevision !== undefined && session.sessionRevision !== options.sessionRevision) {
+      return false;
+    }
 
     this.activeSessionId = null;
     session.cancellationRequested = true;
@@ -489,6 +620,22 @@ export class ReplayOrchestrator {
 
     if (this.abortController) {
       this.abortController.abort();
+    }
+
+    if (session.recoveryContext) {
+      session.recoveryContext.history.push({
+        id: `DEC_${Date.now()}_stop`,
+        decisionType: 'STOP_REPLAY',
+        sessionId: session.sessionId,
+        workflowId: session.workflowId,
+        sessionRevision: session.sessionRevision,
+        stepIndex: session.currentStepIndex,
+        actionId: session.currentActionId || '',
+        timestamp: Date.now(),
+        authorizedByUser: true,
+        recordIndex: session.datasetState?.currentRecordIndex,
+        rationale: options?.rationale || 'Session stopped by user during recovery inspection',
+      });
     }
 
     this.activeSession = null;
@@ -509,6 +656,447 @@ export class ReplayOrchestrator {
     await ReplaySessionStorage.clearActiveSession('CANCELLED');
     this.broadcastStatusChange();
     return true;
+  }
+
+  /**
+   * Rechecks the postcondition of the interrupted action without redispatching.
+   */
+  public async recheckRecoveryCondition(
+    sessionId?: string,
+    options?: { sessionRevision?: number }
+  ): Promise<{ success: boolean; verification?: VerificationResult; error?: string; code?: string }> {
+    const session = this.activeSession || (await ReplaySessionStorage.getActiveSession());
+    if (!session) {
+      return { success: false, error: 'No active session found', code: 'NO_SESSION' };
+    }
+    if (sessionId && session.sessionId !== sessionId) {
+      return { success: false, error: 'Session ID mismatch', code: 'STALE_SESSION' };
+    }
+    if (options?.sessionRevision !== undefined && session.sessionRevision !== options.sessionRevision) {
+      return { success: false, error: 'Session revision mismatch (concurrent update)', code: 'STALE_REVISION' };
+    }
+    if (session.status !== 'RECOVERY_REQUIRED') {
+      return { success: false, error: `Session not in RECOVERY_REQUIRED state (status: ${session.status})`, code: 'INVALID_STATUS' };
+    }
+
+    if (!this.workflow) {
+      this.workflow = await WorkflowStorage.getWorkflowById(session.workflowId);
+      if (!this.workflow) {
+        return { success: false, error: 'Workflow not found', code: 'WORKFLOW_NOT_FOUND' };
+      }
+    }
+
+    const currentStep = this.workflow.steps[session.currentStepIndex];
+    if (!currentStep) {
+      return { success: false, error: 'Interrupted step not found in workflow', code: 'STEP_NOT_FOUND' };
+    }
+
+    if (!session.recoveryContext) {
+      session.recoveryContext = {
+        interruptedStepIndex: session.currentStepIndex,
+        interruptedActionId: session.currentActionId || '',
+        safetyCategory: classifyActionSafety(currentStep),
+        reason: session.lastError || 'Outcome uncertain',
+        evidence: [],
+        history: [],
+      };
+    }
+
+    ReplaySessionStorage.appendEvent(
+      session,
+      'RECOVERY_RECHECK_STARTED',
+      `Rechecking postcondition for step ${session.currentStepIndex + 1} without redispatching`
+    );
+
+    let verificationResult: VerificationResult | undefined;
+
+    if (session.targetTabId) {
+      try {
+        const resp = await chrome.tabs.sendMessage(session.targetTabId, {
+          type: 'RECHECK_STEP_CONDITION',
+          payload: {
+            step: currentStep,
+            sessionId: session.sessionId,
+            actionId: session.currentActionId,
+            stepIndex: session.currentStepIndex,
+          },
+        });
+        if (resp && resp.verification) {
+          verificationResult = resp.verification;
+        }
+      } catch (err: unknown) {
+        console.warn('[ReplayOrchestrator] Content script unreachable during recheck:', err);
+      }
+    }
+
+    const resultStatus = verificationResult?.status === 'VERIFIED'
+      ? 'SUCCESS'
+      : verificationResult?.status === 'OUTCOME_UNKNOWN'
+      ? 'UNCERTAIN'
+      : verificationResult ? 'FAILURE' : 'INCONCLUSIVE';
+
+    const evidence: RecoveryEvidence = {
+      id: `EVD_${Date.now()}_recheck`,
+      type: 'dom_postcondition',
+      timestamp: Date.now(),
+      stepIndex: session.currentStepIndex,
+      actionId: session.currentActionId || '',
+      result: resultStatus,
+      description: verificationResult?.diagnosticInfo || (verificationResult ? `Recheck returned status ${verificationResult.status}` : 'Could not reach target tab to verify postcondition'),
+      source: 'AUTOMATED_CHECK',
+      isUserProvided: false,
+      details: verificationResult ? { method: verificationResult.method, expectedCondition: verificationResult.expectedCondition, actualState: verificationResult.actualState } : undefined,
+    };
+
+    if (session.recoveryContext) {
+      session.recoveryContext.evidence.push(evidence);
+    }
+    if (verificationResult) {
+      session.lastVerificationResult = verificationResult;
+    }
+
+    ReplaySessionStorage.appendEvent(
+      session,
+      'RECOVERY_RECHECK_COMPLETED',
+      `Recheck completed with result: ${resultStatus}`
+    );
+
+    this.activeSession = await ReplaySessionStorage.saveSession(session);
+    this.broadcastStatusChange();
+
+    return {
+      success: true,
+      verification: verificationResult,
+    };
+  }
+
+  /**
+   * Safe, read-only inspection of the target tab's current DOM & URL state.
+   */
+  public async inspectRecoveryPageState(
+    sessionId?: string,
+    options?: { sessionRevision?: number }
+  ): Promise<{ success: boolean; inspection?: any; error?: string; code?: string }> {
+    const session = this.activeSession || (await ReplaySessionStorage.getActiveSession());
+    if (!session) {
+      return { success: false, error: 'No active session found', code: 'NO_SESSION' };
+    }
+    if (sessionId && session.sessionId !== sessionId) {
+      return { success: false, error: 'Session ID mismatch', code: 'STALE_SESSION' };
+    }
+    if (options?.sessionRevision !== undefined && session.sessionRevision !== options.sessionRevision) {
+      return { success: false, error: 'Session revision mismatch', code: 'STALE_REVISION' };
+    }
+    if (session.status !== 'RECOVERY_REQUIRED') {
+      return { success: false, error: `Session not in RECOVERY_REQUIRED state (status: ${session.status})`, code: 'INVALID_STATUS' };
+    }
+
+    if (!this.workflow) {
+      this.workflow = await WorkflowStorage.getWorkflowById(session.workflowId);
+    }
+    const currentStep = this.workflow?.steps[session.currentStepIndex];
+
+    if (!session.recoveryContext) {
+      session.recoveryContext = {
+        interruptedStepIndex: session.currentStepIndex,
+        interruptedActionId: session.currentActionId || '',
+        safetyCategory: currentStep ? classifyActionSafety(currentStep) : 'EXTERNAL_SIDE_EFFECT',
+        reason: session.lastError || 'Outcome uncertain',
+        evidence: [],
+        history: [],
+      };
+    }
+
+    ReplaySessionStorage.appendEvent(
+      session,
+      'RECOVERY_INSPECTION_STARTED',
+      'Inspecting current page URL and target element state'
+    );
+
+    let inspectionResp: any = null;
+    if (session.targetTabId) {
+      try {
+        inspectionResp = await chrome.tabs.sendMessage(session.targetTabId, {
+          type: 'INSPECT_PAGE_STATE',
+          payload: {
+            step: currentStep,
+          },
+        });
+      } catch (err: unknown) {
+        console.warn('[ReplayOrchestrator] Content script unreachable during page inspection:', err);
+      }
+    }
+
+    if (inspectionResp && inspectionResp.success) {
+      if (session.recoveryContext) {
+        session.recoveryContext.lastInspection = {
+          timestamp: Date.now(),
+          url: inspectionResp.url,
+          title: inspectionResp.title,
+          targetFound: inspectionResp.targetFound,
+          details: inspectionResp.targetDetails ? JSON.stringify(inspectionResp.targetDetails) : undefined,
+        };
+
+        if (inspectionResp.url) {
+          session.recoveryContext.evidence.push({
+            id: `EVD_${Date.now()}_url`,
+            type: 'url_observation',
+            timestamp: Date.now(),
+            stepIndex: session.currentStepIndex,
+            actionId: session.currentActionId || '',
+            result: 'UNCERTAIN',
+            description: `Observed current URL: ${inspectionResp.url}`,
+            source: 'AUTOMATED_CHECK',
+            isUserProvided: false,
+            details: { url: inspectionResp.url, title: inspectionResp.title },
+          });
+        }
+
+        if (inspectionResp.targetFound !== undefined) {
+          session.recoveryContext.evidence.push({
+            id: `EVD_${Date.now()}_target`,
+            type: 'target_element_state',
+            timestamp: Date.now(),
+            stepIndex: session.currentStepIndex,
+            actionId: session.currentActionId || '',
+            result: inspectionResp.targetFound ? 'SUCCESS' : 'INCONCLUSIVE',
+            description: inspectionResp.targetFound
+              ? 'Target element found in page DOM'
+              : 'Target element was not found in page DOM',
+            source: 'AUTOMATED_CHECK',
+            isUserProvided: false,
+            details: inspectionResp.targetDetails,
+          });
+        }
+      }
+    } else {
+      if (session.recoveryContext) {
+        session.recoveryContext.evidence.push({
+          id: `EVD_${Date.now()}_inconclusive_inspect`,
+          type: 'inconclusive',
+          timestamp: Date.now(),
+          stepIndex: session.currentStepIndex,
+          actionId: session.currentActionId || '',
+          result: 'INCONCLUSIVE',
+          description: 'Unable to inspect page state: target tab or content script is not responding',
+          source: 'AUTOMATED_CHECK',
+          isUserProvided: false,
+        });
+      }
+    }
+
+    this.activeSession = await ReplaySessionStorage.saveSession(session);
+    this.broadcastStatusChange();
+
+    return {
+      success: true,
+      inspection: inspectionResp,
+    };
+  }
+
+  /**
+   * User confirms the action succeeded on the destination page.
+   * Advances exactly once to next step WITHOUT redispatching the action.
+   */
+  public async confirmRecoverySuccess(
+    sessionId?: string,
+    options?: { rationale?: string; sessionRevision?: number }
+  ): Promise<{ success: boolean; error?: string; code?: string }> {
+    const session = this.activeSession || (await ReplaySessionStorage.getActiveSession());
+    if (!session) {
+      return { success: false, error: 'No active session found', code: 'NO_SESSION' };
+    }
+    if (sessionId && session.sessionId !== sessionId) {
+      return { success: false, error: 'Session ID mismatch', code: 'STALE_SESSION' };
+    }
+    if (options?.sessionRevision !== undefined && session.sessionRevision !== options.sessionRevision) {
+      return { success: false, error: 'Session revision mismatch (concurrent update)', code: 'STALE_REVISION' };
+    }
+    if (session.status !== 'RECOVERY_REQUIRED') {
+      return { success: false, error: `Session not in RECOVERY_REQUIRED state (status: ${session.status})`, code: 'INVALID_STATUS' };
+    }
+
+    if (!this.workflow) {
+      this.workflow = await WorkflowStorage.getWorkflowById(session.workflowId);
+      if (!this.workflow) {
+        return { success: false, error: 'Workflow not found', code: 'WORKFLOW_NOT_FOUND' };
+      }
+    }
+
+    const currentStep = this.workflow.steps[session.currentStepIndex];
+
+    if (!session.recoveryContext) {
+      session.recoveryContext = {
+        interruptedStepIndex: session.currentStepIndex,
+        interruptedActionId: session.currentActionId || '',
+        safetyCategory: currentStep ? classifyActionSafety(currentStep) : 'EXTERNAL_SIDE_EFFECT',
+        reason: session.lastError || 'Outcome uncertain',
+        evidence: [],
+        history: [],
+      };
+    }
+
+    const decision: RecoveryDecision = {
+      id: `DEC_${Date.now()}_success`,
+      decisionType: 'CONFIRM_SUCCESS',
+      sessionId: session.sessionId,
+      workflowId: session.workflowId,
+      sessionRevision: session.sessionRevision,
+      stepIndex: session.currentStepIndex,
+      actionId: session.currentActionId || '',
+      timestamp: Date.now(),
+      authorizedByUser: true,
+      recordIndex: session.datasetState?.currentRecordIndex,
+      rationale: options?.rationale || 'User confirmed that the action succeeded on destination page',
+    };
+
+    if (session.recoveryContext) {
+      session.recoveryContext.history.push(decision);
+      session.recoveryContext.evidence.push({
+        id: `EVD_${Date.now()}_user_success`,
+        type: 'user_confirmation',
+        timestamp: Date.now(),
+        stepIndex: session.currentStepIndex,
+        actionId: session.currentActionId || '',
+        result: 'SUCCESS',
+        description: options?.rationale || 'User confirmed success after inspection. Flow continues without redispatching.',
+        source: 'USER_CONFIRMATION',
+        isUserProvided: true,
+      });
+    }
+
+    // Advance step without redispatching
+    session.lastCompletedStepIndex = session.currentStepIndex;
+    session.currentStepIndex++;
+    session.currentActionId = null;
+    session.actionState = 'NOT_STARTED';
+    session.attemptCount = 0;
+    session.status = 'WAITING';
+    session.lastError = null;
+    session.lastErrorCode = null;
+
+    ReplaySessionStorage.appendEvent(
+      session,
+      'RECOVERY_DECISION_PROCESSED',
+      `User confirmed success for step ${session.lastCompletedStepIndex + 1}. Continuing next step.`
+    );
+
+    this.activeSessionId = session.sessionId;
+    this.abortController = new AbortController();
+    this.activeSession = await ReplaySessionStorage.saveSession(session);
+    this.broadcastStatusChange();
+
+    void this.executeNextStep();
+    return { success: true };
+  }
+
+  /**
+   * User confirms the action failed and authorizes retry.
+   * If action is non-idempotent or has external side effects, requires explicit forceUnsafeRetry.
+   */
+  public async confirmRecoveryFailureAndRetry(
+    sessionId?: string,
+    options?: { forceUnsafeRetry?: boolean; rationale?: string; sessionRevision?: number }
+  ): Promise<{ success: boolean; error?: string; code?: string; safetyCategory?: string }> {
+    const session = this.activeSession || (await ReplaySessionStorage.getActiveSession());
+    if (!session) {
+      return { success: false, error: 'No active session found', code: 'NO_SESSION' };
+    }
+    if (sessionId && session.sessionId !== sessionId) {
+      return { success: false, error: 'Session ID mismatch', code: 'STALE_SESSION' };
+    }
+    if (options?.sessionRevision !== undefined && session.sessionRevision !== options.sessionRevision) {
+      return { success: false, error: 'Session revision mismatch (concurrent update)', code: 'STALE_REVISION' };
+    }
+    if (session.status !== 'RECOVERY_REQUIRED') {
+      return { success: false, error: `Session not in RECOVERY_REQUIRED state (status: ${session.status})`, code: 'INVALID_STATUS' };
+    }
+
+    if (!this.workflow) {
+      this.workflow = await WorkflowStorage.getWorkflowById(session.workflowId);
+      if (!this.workflow) {
+        return { success: false, error: 'Workflow not found', code: 'WORKFLOW_NOT_FOUND' };
+      }
+    }
+
+    const currentStep = this.workflow.steps[session.currentStepIndex];
+    const safety = currentStep ? classifyActionSafety(currentStep) : 'EXTERNAL_SIDE_EFFECT';
+
+    if ((safety === 'EXTERNAL_SIDE_EFFECT' || safety === 'TOGGLE_STATE') && !options?.forceUnsafeRetry) {
+      const err = 'Unsafe action retry blocked: Explicit user authorization (forceUnsafeRetry) required to retry side-effecting action.';
+      session.lastError = err;
+      session.lastErrorCode = 'UNSAFE_RETRY_UNAUTHORIZED';
+      await ReplaySessionStorage.saveSession(session);
+      this.broadcastStatusChange();
+      return {
+        success: false,
+        error: err,
+        code: 'UNSAFE_RETRY_UNAUTHORIZED',
+        safetyCategory: safety,
+      };
+    }
+
+    if (!session.recoveryContext) {
+      session.recoveryContext = {
+        interruptedStepIndex: session.currentStepIndex,
+        interruptedActionId: session.currentActionId || '',
+        safetyCategory: safety,
+        reason: session.lastError || 'Outcome uncertain',
+        evidence: [],
+        history: [],
+      };
+    }
+
+    const decision: RecoveryDecision = {
+      id: `DEC_${Date.now()}_retry`,
+      decisionType: 'CONFIRM_FAILURE_RETRY',
+      sessionId: session.sessionId,
+      workflowId: session.workflowId,
+      sessionRevision: session.sessionRevision,
+      stepIndex: session.currentStepIndex,
+      actionId: session.currentActionId || '',
+      timestamp: Date.now(),
+      authorizedByUser: true,
+      forceUnsafeRetry: !!options?.forceUnsafeRetry,
+      recordIndex: session.datasetState?.currentRecordIndex,
+      rationale: options?.rationale || 'User confirmed failure and authorized retry attempt',
+    };
+
+    if (session.recoveryContext) {
+      session.recoveryContext.history.push(decision);
+      session.recoveryContext.evidence.push({
+        id: `EVD_${Date.now()}_user_retry`,
+        type: 'user_confirmation',
+        timestamp: Date.now(),
+        stepIndex: session.currentStepIndex,
+        actionId: session.currentActionId || '',
+        result: 'FAILURE',
+        description: options?.rationale || 'User confirmed failure of original attempt; authorized redispatch',
+        source: 'USER_CONFIRMATION',
+        isUserProvided: true,
+      });
+    }
+
+    session.attemptCount = (session.attemptCount || 0) + 1;
+    session.currentActionId = `${session.sessionId}_step${session.currentStepIndex}_attempt${session.attemptCount}`;
+    session.status = 'WAITING';
+    session.actionState = 'NOT_STARTED';
+    session.lastError = null;
+    session.lastErrorCode = null;
+
+    ReplaySessionStorage.appendEvent(
+      session,
+      'RECOVERY_DECISION_PROCESSED',
+      `User authorized retry for step ${session.currentStepIndex + 1} (Attempt ${session.attemptCount + 1}). Redispatching.`
+    );
+
+    this.activeSessionId = session.sessionId;
+    this.abortController = new AbortController();
+    this.activeSession = await ReplaySessionStorage.saveSession(session);
+    this.broadcastStatusChange();
+
+    void this.executeNextStep();
+    return { success: true };
   }
 
   /**
@@ -552,6 +1140,7 @@ export class ReplayOrchestrator {
           .catch(() => {});
       }
 
+      this.recordExecutionHistory('SUCCESS');
       await ReplaySessionStorage.clearActiveSession('COMPLETED');
       this.broadcastStatusChange();
       chrome.runtime
@@ -570,6 +1159,29 @@ export class ReplayOrchestrator {
       return;
     }
 
+    // Centralized execution budget enforcement across all steps, retries, conditional branches, and records
+    this.activeSession.stepExecutionCount = (this.activeSession.stepExecutionCount || 0) + 1;
+    this.activeSession.totalStepExecutionCount = (this.activeSession.totalStepExecutionCount || 0) + 1;
+    const maxBudget = this.activeSession.maxStepBudget || this.workflow.settings?.maxStepBudget || 500;
+    const totalMaxBudget = maxBudget * Math.max(1, (this.activeSession.datasetState?.totalRecords || 1)) * 2;
+
+    if (this.activeSession.stepExecutionCount > maxBudget || this.activeSession.totalStepExecutionCount > totalMaxBudget) {
+      const err = `Execution budget exceeded (${this.activeSession.stepExecutionCount > maxBudget ? maxBudget : totalMaxBudget} steps). Possible infinite loop or runaway replay.`;
+      console.error('[ReplayOrchestrator]', err);
+      this.activeSession.status = 'FAILED';
+      this.activeSession.actionState = 'FAILED';
+      this.activeSession.lastError = err;
+      this.activeSession.lastErrorCode = 'EXECUTION_BUDGET_EXCEEDED';
+      ReplaySessionStorage.appendEvent(
+        this.activeSession,
+        'EXECUTION_BUDGET_EXCEEDED',
+        err
+      );
+      this.activeSession = await ReplaySessionStorage.saveSession(this.activeSession);
+      this.broadcastStatusChange();
+      return;
+    }
+
     const stepIndex = this.activeSession.currentStepIndex;
     const step = this.workflow.steps[stepIndex];
 
@@ -577,6 +1189,14 @@ export class ReplayOrchestrator {
     if (step.type === 'condition') {
       await this.executeConditionStep(step, stepIndex);
       return;
+    }
+
+    const safetyCategory = classifyActionSafety(step);
+    if (
+      (safetyCategory === 'EXTERNAL_SIDE_EFFECT' || safetyCategory === 'TOGGLE_STATE') &&
+      this.activeSession.datasetState
+    ) {
+      this.activeSession.datasetState.hasUnsafeActionExecutedInCurrentRecord = true;
     }
 
     const preparedStep = this.prepareStepVariables(step);
@@ -613,6 +1233,9 @@ export class ReplayOrchestrator {
 
       // Initial step navigation if URL is fundamentally different
       if (stepIndex === 0 && preparedStep.url && currentTab.url && currentTab.id) {
+        if (!isSafeUrl(preparedStep.url)) {
+          throw new Error(`Cannot navigate to unsafe URL scheme: ${preparedStep.url}`);
+        }
         try {
           const currentUrlObj = new URL(currentTab.url);
           const targetUrlObj = new URL(preparedStep.url);
@@ -708,6 +1331,12 @@ export class ReplayOrchestrator {
               total: this.workflow.steps.length,
               sessionId: this.activeSession.sessionId,
               actionId,
+              datasetInfo: this.activeSession.datasetState
+                ? {
+                    recordIndex: this.activeSession.datasetState.currentRecordIndex + 1,
+                    totalRecords: this.activeSession.datasetState.totalRecords,
+                  }
+                : undefined,
             },
           });
 
@@ -754,6 +1383,30 @@ export class ReplayOrchestrator {
               result.verification.recoveryRecommendation ||
               result.verification.diagnosticInfo ||
               'Action outcome is uncertain. Replay paused to avoid repeating potentially unsafe action.';
+
+            const safety = classifyActionSafety(step);
+            this.activeSession.recoveryContext = {
+              interruptedStepIndex: stepIndex,
+              interruptedActionId: actionId,
+              safetyCategory: safety,
+              reason: this.activeSession.lastError || 'Action outcome is uncertain',
+              evidence: [
+                {
+                  id: `EVD_${Date.now()}_init`,
+                  type: 'dom_postcondition',
+                  timestamp: Date.now(),
+                  stepIndex,
+                  actionId,
+                  result: 'UNCERTAIN',
+                  description: result.verification?.diagnosticInfo || 'Automated verification returned OUTCOME_UNKNOWN',
+                  source: 'AUTOMATED_CHECK',
+                  isUserProvided: false,
+                  details: result.verification ? { method: result.verification.method, expectedCondition: result.verification.expectedCondition } : undefined,
+                },
+              ],
+              history: [],
+            };
+
             ReplaySessionStorage.appendEvent(
               this.activeSession,
               'OUTCOME_UNCERTAIN',
@@ -761,6 +1414,19 @@ export class ReplayOrchestrator {
             );
             this.activeSession = await ReplaySessionStorage.saveSession(this.activeSession);
             this.broadcastStatusChange();
+
+            if (this.activeSession.targetTabId) {
+              chrome.tabs
+                .sendMessage(this.activeSession.targetTabId, {
+                  type: 'SHOW_RECOVERY_HUD',
+                  payload: {
+                    session: this.activeSession,
+                    step,
+                    message: this.activeSession.lastError,
+                  },
+                })
+                .catch(() => {});
+            }
             return;
           } else {
             // Check if verification explicitly failed
@@ -925,6 +1591,8 @@ export class ReplayOrchestrator {
           index: dsState.currentRecordIndex,
           error: errorMsg,
           stepIndex: this.activeSession.currentStepIndex,
+          outcomeUnknown: this.activeSession.actionState === 'OUTCOME_UNKNOWN',
+          executedUnsafeStep: dsState.hasUnsafeActionExecutedInCurrentRecord || false,
         });
         ReplaySessionStorage.appendEvent(
           this.activeSession,
@@ -943,6 +1611,14 @@ export class ReplayOrchestrator {
         errorMsg,
         errorCode
       );
+
+      let failureCategory: FailureCategory = 'UNEXPECTED';
+      if (errorCode === 'BUDGET_EXCEEDED') failureCategory = 'BUDGET_EXCEEDED';
+      else if (errorCode === 'TIMEOUT' || errorMsg.includes('timed out')) failureCategory = 'TIMEOUT';
+      else if (errorCode === 'TARGET_NOT_FOUND' || errorMsg.includes('Target not found')) failureCategory = 'TARGET_NOT_FOUND';
+      else if (errorCode === 'VERIFICATION_FAILED') failureCategory = 'VERIFICATION_FAILED';
+      else if (errorCode === 'SIDE_EFFECT_REFUSED') failureCategory = 'SIDE_EFFECT_REFUSED';
+      this.recordExecutionHistory('FAILED', failureCategory, errorMsg);
 
       this.activeSession = await ReplaySessionStorage.saveSession(this.activeSession);
       this.broadcastStatusChange();
@@ -1084,26 +1760,6 @@ export class ReplayOrchestrator {
       return;
     }
 
-    this.activeSession.stepExecutionCount = (this.activeSession.stepExecutionCount || 0) + 1;
-    const maxBudget = this.activeSession.maxStepBudget || this.workflow.settings?.maxStepBudget || 500;
-
-    if (this.activeSession.stepExecutionCount > maxBudget) {
-      const err = `Execution budget exceeded (${maxBudget} steps). Possible infinite loop in conditional branching.`;
-      console.error('[ReplayOrchestrator]', err);
-      this.activeSession.status = 'FAILED';
-      this.activeSession.actionState = 'FAILED';
-      this.activeSession.lastError = err;
-      this.activeSession.lastErrorCode = 'EXECUTION_BUDGET_EXCEEDED';
-      ReplaySessionStorage.appendEvent(
-        this.activeSession,
-        'EXECUTION_BUDGET_EXCEEDED',
-        err
-      );
-      this.activeSession = await ReplaySessionStorage.saveSession(this.activeSession);
-      this.broadcastStatusChange();
-      return;
-    }
-
     if (!this.variableContext) {
       this.variableContext = new VariableContext(
         this.workflow.variables || [],
@@ -1150,7 +1806,21 @@ export class ReplayOrchestrator {
     } else {
       const targetIdx = this.workflow.steps.findIndex((s) => s.id === evalResult.targetBranch);
       if (targetIdx === -1) {
-        throw new Error(`Target branch step ID "${evalResult.targetBranch}" not found in workflow`);
+        const err = `Invalid branch target step ID "${evalResult.targetBranch}" not found in workflow`;
+        console.error('[ReplayOrchestrator]', err);
+        this.activeSession.status = 'FAILED';
+        this.activeSession.actionState = 'FAILED';
+        this.activeSession.lastError = err;
+        this.activeSession.lastErrorCode = 'INVALID_BRANCH_TARGET';
+        ReplaySessionStorage.appendEvent(
+          this.activeSession,
+          'SESSION_FAILED',
+          err,
+          'INVALID_BRANCH_TARGET'
+        );
+        this.activeSession = await ReplaySessionStorage.saveSession(this.activeSession);
+        this.broadcastStatusChange();
+        return;
       }
       nextStepIndex = targetIdx;
     }
@@ -1200,6 +1870,7 @@ export class ReplayOrchestrator {
       nextRecordIdx < this.activeDataset.records.length
     ) {
       dsState.currentRecordIndex = nextRecordIdx;
+      dsState.hasUnsafeActionExecutedInCurrentRecord = false;
       this.activeSession.currentStepIndex = 0;
       this.activeSession.lastCompletedStepIndex = -1;
       this.activeSession.stepExecutionCount = 0;
@@ -1255,6 +1926,7 @@ export class ReplayOrchestrator {
           .catch(() => {});
       }
 
+      this.recordExecutionHistory('SUCCESS');
       await ReplaySessionStorage.clearActiveSession('COMPLETED');
       this.broadcastStatusChange();
       chrome.runtime
@@ -1281,20 +1953,53 @@ export class ReplayOrchestrator {
     return true;
   }
 
-  public async retryDatasetRecord(sessionId?: string): Promise<boolean> {
+  public async retryDatasetRecord(
+    sessionId?: string,
+    options?: { forceUnsafeRetry?: boolean }
+  ): Promise<boolean> {
     if (!this.activeSession || (sessionId && this.activeSession.sessionId !== sessionId)) {
       return false;
     }
-    if (!this.activeSession.datasetState || !this.activeDataset) return false;
-
+    if (!this.activeSession.datasetState) return false;
     const dsState = this.activeSession.datasetState;
+    if (!this.activeDataset && dsState.records && dsState.records.length > 0) {
+      this.activeDataset = {
+        records: dsState.records,
+        columns: Object.keys(dsState.records[0] || {}),
+        rowCount: dsState.records.length,
+        fingerprint: dsState.fingerprint,
+      };
+    }
+    if (!this.activeDataset) return false;
     const currentRecordIdx = dsState.currentRecordIndex;
 
+    // Safety check: if current record executed an unsafe action with external side effects,
+    // require explicit user recovery confirmation (forceUnsafeRetry)
+    if (dsState.hasUnsafeActionExecutedInCurrentRecord && !options?.forceUnsafeRetry) {
+      console.warn(
+        `[ReplayOrchestrator] Record ${currentRecordIdx + 1} previously executed an unsafe action. Blind restart at step 0 blocked without forceUnsafeRetry.`
+      );
+      this.activeSession.status = 'RECOVERY_REQUIRED';
+      this.activeSession.lastError =
+        'Record restart at step 0 blocked: Record executed non-idempotent action with side effects. Explicit confirmation (forceUnsafeRetry) required.';
+      this.activeSession.lastErrorCode = 'UNSAFE_RECORD_RETRY_BLOCKED';
+      ReplaySessionStorage.appendEvent(
+        this.activeSession,
+        'SESSION_RECOVERY_REQUIRED',
+        'Record restart at step 0 blocked: requires forceUnsafeRetry'
+      );
+      this.activeSession = await ReplaySessionStorage.saveSession(this.activeSession);
+      this.broadcastStatusChange();
+      return false;
+    }
+
+    dsState.hasUnsafeActionExecutedInCurrentRecord = false;
     this.activeSession.currentStepIndex = 0;
     this.activeSession.lastCompletedStepIndex = -1;
     this.activeSession.status = 'RUNNING';
     this.activeSession.actionState = 'NOT_STARTED';
     this.activeSession.lastError = null;
+    this.activeSession.lastErrorCode = null;
 
     if (this.baseVariableContext) {
       this.variableContext = this.baseVariableContext.createRecordContext(
@@ -1354,6 +2059,10 @@ export class ReplayOrchestrator {
     }
 
     return cloned;
+  }
+
+  public static getInstance(): ReplayOrchestrator {
+    return orchestrator;
   }
 }
 

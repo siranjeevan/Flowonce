@@ -1,4 +1,5 @@
 import type { VerificationResult } from '../verification-types';
+import type { ActionSafetyCategory } from '../ActionVerifier';
 
 /**
  * Types and interfaces for Persistent Replay Session Management in FlowOnce.
@@ -52,7 +53,71 @@ export type ReplayDiagnosticEventType =
   | 'OUTPUT_EXTRACTED'
   | 'CONDITION_EVALUATED'
   | 'BRANCH_TAKEN'
-  | 'EXECUTION_BUDGET_EXCEEDED';
+  | 'EXECUTION_BUDGET_EXCEEDED'
+  | 'RECOVERY_INSPECTION_STARTED'
+  | 'RECOVERY_EVIDENCE_RECORDED'
+  | 'RECOVERY_DECISION_PROCESSED'
+  | 'RECOVERY_RECHECK_STARTED'
+  | 'RECOVERY_RECHECK_COMPLETED';
+
+export type RecoveryEvidenceType =
+  | 'dom_postcondition'
+  | 'url_observation'
+  | 'target_element_state'
+  | 'user_confirmation'
+  | 'inconclusive';
+
+export interface RecoveryEvidence {
+  id: string;
+  type: RecoveryEvidenceType;
+  timestamp: number;
+  stepIndex: number;
+  actionId: string;
+  result: 'SUCCESS' | 'FAILURE' | 'UNCERTAIN' | 'INCONCLUSIVE';
+  description: string;
+  source: 'AUTOMATED_CHECK' | 'USER_CONFIRMATION';
+  isUserProvided: boolean;
+  details?: Record<string, any>;
+}
+
+export type RecoveryDecisionType =
+  | 'CONFIRM_SUCCESS'
+  | 'CONFIRM_FAILURE_RETRY'
+  | 'RECHECK_CONDITION'
+  | 'STOP_REPLAY'
+  | 'INSPECT_PAGE';
+
+export interface RecoveryDecision {
+  id: string;
+  decisionType: RecoveryDecisionType;
+  sessionId: string;
+  workflowId: string;
+  sessionRevision: number;
+  stepIndex: number;
+  actionId: string;
+  timestamp: number;
+  authorizedByUser: boolean;
+  forceUnsafeRetry?: boolean;
+  recordIndex?: number;
+  rationale?: string;
+}
+
+export interface RecoveryContext {
+  interruptedStepIndex: number;
+  interruptedActionId: string;
+  safetyCategory: ActionSafetyCategory;
+  reason: string;
+  evidence: RecoveryEvidence[];
+  pendingDecision?: RecoveryDecision;
+  history: RecoveryDecision[];
+  lastInspection?: {
+    timestamp: number;
+    url?: string;
+    title?: string;
+    targetFound?: boolean;
+    details?: string;
+  };
+}
 
 export interface ReplayDiagnosticEvent {
   type: ReplayDiagnosticEventType;
@@ -67,6 +132,8 @@ export interface DatasetRecordSummary {
   index: number;
   error?: string;
   stepIndex?: number;
+  outcomeUnknown?: boolean;
+  executedUnsafeStep?: boolean;
 }
 
 export interface DatasetExecutionState {
@@ -78,6 +145,8 @@ export interface DatasetExecutionState {
   completedRecords: number[];
   failedRecords: DatasetRecordSummary[];
   skippedRecords: number[];
+  records?: Record<string, any>[];
+  hasUnsafeActionExecutedInCurrentRecord?: boolean;
 }
 
 export interface ReplayConditionResult {
@@ -124,8 +193,10 @@ export interface ReplaySession {
   extractedVariables?: Record<string, any>;
   /** Optional dataset execution state for dataset-driven runs */
   datasetState?: DatasetExecutionState;
-  /** Execution budget counter to prevent infinite branch loops */
+  /** Execution budget counter to prevent infinite branch loops within record/scope */
   stepExecutionCount?: number;
+  /** Cumulative execution counter across all steps, retries, branches, and records */
+  totalStepExecutionCount?: number;
   /** Maximum execution step budget */
   maxStepBudget?: number;
   /** Result of last evaluated condition branch */
@@ -140,6 +211,8 @@ export interface ReplaySession {
   lastErrorCode?: string | null;
   /** Result of last evaluated postcondition verification */
   lastVerificationResult?: VerificationResult | null;
+  /** Interactive recovery inspector context if session entered RECOVERY_REQUIRED */
+  recoveryContext?: RecoveryContext;
   /** Optimistic concurrency revision counter incremented on every write */
   sessionRevision: number;
   /** Timestamp when session started */

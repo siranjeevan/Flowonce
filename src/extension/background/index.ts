@@ -5,6 +5,7 @@ import { orchestrator } from '../../replay/ReplayOrchestrator';
 import { WorkflowStorage } from '../../workflow/storage/WorkflowStorage';
 import { validateWorkflow } from '../../workflow/storage/schema';
 import { ReplaySessionStorage } from '../../replay/session/ReplaySessionStorage';
+import { ScheduleManager } from '../../automation/scheduler/ScheduleManager';
 
 // Initialize storage & reconcile replay sessions on service worker boot
 WorkflowStorage.ensureInitialized().catch((err) => {
@@ -13,6 +14,18 @@ WorkflowStorage.ensureInitialized().catch((err) => {
 orchestrator.reconcileSessionOnBoot().catch((err) => {
   console.error('[Background] Replay session reconciliation failed on boot:', err);
 });
+ScheduleManager.initializeSchedulerOnBoot().catch((err) => {
+  console.error('[Background] ScheduleManager initialization failed on boot:', err);
+});
+
+// Alarm listener for scheduled workflows
+if (typeof chrome !== 'undefined' && chrome.alarms?.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    ScheduleManager.handleAlarm(alarm.name).catch((err) => {
+      console.error('[Background] Error executing scheduled alarm:', err);
+    });
+  });
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   console.log("FlowOnce installed.");
@@ -21,6 +34,9 @@ chrome.runtime.onInstalled.addListener(() => {
   });
   orchestrator.reconcileSessionOnBoot().catch((err) => {
     console.error('[Background] Session reconciliation failed onInstalled:', err);
+  });
+  ScheduleManager.initializeSchedulerOnBoot().catch((err) => {
+    console.error('[Background] ScheduleManager onInstalled failed:', err);
   });
 });
 
@@ -117,6 +133,49 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     })();
     return true; // async
   }
+  else if (message.type === 'PLAY_DATASET') {
+    (async () => {
+      const rawWorkflow = message.payload?.workflow;
+      const validation = validateWorkflow(rawWorkflow);
+
+      if (!validation.valid) {
+        const errorMsg = `Cannot replay invalid workflow: ${validation.errors.map(e => `[${e.field}] ${e.message}`).join(', ')}`;
+        console.error('[Background]', errorMsg);
+        sendResponse({ success: false, error: errorMsg });
+        return;
+      }
+
+      const result = await orchestrator.startWithDataset(
+        rawWorkflow,
+        message.payload.dataset,
+        {
+          variables: message.payload.variables,
+          speedMultiplier: message.payload.speedMultiplier || 1,
+          tabId: message.payload.tabId,
+        }
+      );
+
+      sendResponse(result);
+    })();
+    return true; // async
+  }
+  else if (message.type === 'SKIP_RECORD') {
+    (async () => {
+      const skipped = await orchestrator.skipDatasetRecord(message.payload?.sessionId);
+      sendResponse({ success: skipped });
+    })();
+    return true; // async
+  }
+  else if (message.type === 'RETRY_RECORD') {
+    (async () => {
+      const retried = await orchestrator.retryDatasetRecord(
+        message.payload?.sessionId,
+        message.payload?.options
+      );
+      sendResponse({ success: retried });
+    })();
+    return true; // async
+  }
   else if (message.type === 'GET_REPLAY_STATUS') {
     (async () => {
       const session = orchestrator.getSession() || await ReplaySessionStorage.getActiveSession();
@@ -126,10 +185,53 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   else if (message.type === 'STOP_WORKFLOW') {
     (async () => {
-      const stopped = await orchestrator.stop(message.payload?.sessionId);
+      const stopped = await orchestrator.stop(
+        message.payload?.sessionId,
+        message.payload?.options
+      );
       sendResponse({ success: stopped });
     })();
     return true;
+  }
+  else if (message.type === 'RECOVERY_RECHECK_CONDITION') {
+    (async () => {
+      const result = await orchestrator.recheckRecoveryCondition(
+        message.payload?.sessionId,
+        message.payload?.options
+      );
+      sendResponse(result);
+    })();
+    return true; // async
+  }
+  else if (message.type === 'RECOVERY_INSPECT_PAGE') {
+    (async () => {
+      const result = await orchestrator.inspectRecoveryPageState(
+        message.payload?.sessionId,
+        message.payload?.options
+      );
+      sendResponse(result);
+    })();
+    return true; // async
+  }
+  else if (message.type === 'RECOVERY_CONFIRM_SUCCESS') {
+    (async () => {
+      const result = await orchestrator.confirmRecoverySuccess(
+        message.payload?.sessionId,
+        message.payload?.options
+      );
+      sendResponse(result);
+    })();
+    return true; // async
+  }
+  else if (message.type === 'RECOVERY_CONFIRM_FAILURE_RETRY') {
+    (async () => {
+      const result = await orchestrator.confirmRecoveryFailureAndRetry(
+        message.payload?.sessionId,
+        message.payload?.options
+      );
+      sendResponse(result);
+    })();
+    return true; // async
   }
   else if (message.type === 'PAUSE_WORKFLOW') {
     (async () => {

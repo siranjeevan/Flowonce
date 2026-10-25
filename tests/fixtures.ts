@@ -7,6 +7,7 @@ export const test = base.extend<{
   context: BrowserContext;
   extensionId: string;
 }>({
+  // eslint-disable-next-line no-empty-pattern
   context: async ({}, use) => {
     const pathToExtension = path.resolve(process.cwd(), 'dist');
     const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'flowonce-playwright-'));

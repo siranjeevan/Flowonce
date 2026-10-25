@@ -121,6 +121,10 @@ export class WorkflowStorage {
     return found ? this.clone(found) : null;
   }
 
+  public static async getWorkflow(id: string): Promise<Workflow | null> {
+    return this.getWorkflowById(id);
+  }
+
   /**
    * Creates and persists a new workflow.
    * Validates schema and normalizes before writing.
@@ -248,15 +252,43 @@ export class WorkflowStorage {
 
   /**
    * Exports all workflows as a canonical JSON string.
+   * By default, redacts sensitive variable defaults and sensitive step values
+   * to protect user credentials and secret keys from exposure in exported files.
    */
-  public static async exportWorkflows(): Promise<string> {
+  public static async exportWorkflows(
+    options: { redactSensitive?: boolean } = { redactSensitive: true }
+  ): Promise<string> {
     const workflows = await this.getAllWorkflows();
+    const shouldRedact = options.redactSensitive !== false;
+
+    const exportedWorkflows = workflows.map((wf) => {
+      if (!shouldRedact) return wf;
+      const sanitized = this.clone(wf);
+      if (sanitized.steps) {
+        sanitized.steps = sanitized.steps.map((st) => {
+          if (st.sensitive) {
+            return { ...st, value: undefined };
+          }
+          return st;
+        });
+      }
+      if (sanitized.variables) {
+        sanitized.variables = sanitized.variables.map((v) => {
+          if (v.sensitive) {
+            return { ...v, defaultValue: undefined };
+          }
+          return v;
+        });
+      }
+      return sanitized;
+    });
+
     const payload: WorkflowExportPayload = {
       flowonceVersion: '2.0.0',
       schemaVersion: CURRENT_SCHEMA_VERSION,
       exportedAt: new Date().toISOString(),
-      count: workflows.length,
-      workflows,
+      count: exportedWorkflows.length,
+      workflows: exportedWorkflows,
     };
     return JSON.stringify(payload, null, 2);
   }

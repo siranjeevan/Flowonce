@@ -4,6 +4,7 @@ import { TargetResolver } from './TargetResolver';
 import { ActionVerifier } from './ActionVerifier';
 import { OutputExtractor } from './OutputExtractor';
 import type { VerificationResult } from './verification-types';
+import { isSafeUrl } from '../workflow/storage/schema';
 
 export interface ExecutionOptions {
   signal?: AbortSignal;
@@ -252,6 +253,17 @@ export class ActionExecutor {
       case 'scroll':
         dispatchSuccess = await this.executeScroll(el || document.documentElement, step.position, speedMultiplier, options);
         break;
+      case 'navigate': {
+        const targetUrl = step.url || step.value;
+        if (!targetUrl || !isSafeUrl(targetUrl)) {
+          throw new Error(`Cannot navigate to unsafe or invalid URL: ${targetUrl}`);
+        }
+        if (typeof window !== 'undefined') {
+          window.location.href = targetUrl;
+        }
+        dispatchSuccess = true;
+        break;
+      }
       default:
         console.warn('Action not implemented yet:', step.type);
         dispatchSuccess = true;

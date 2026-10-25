@@ -74,6 +74,16 @@ export function Auth({ onAuthSuccess }: { onAuthSuccess: () => void }) {
       >
         {isSignUp ? 'Already have an account? Sign in' : 'Need an account? Sign up'}
       </button>
+
+      <div className="pt-2 border-t border-gray-700/40">
+        <button
+          type="button"
+          onClick={() => onAuthSuccess()}
+          className="w-full py-1.5 px-3 rounded bg-white/10 hover:bg-white/20 text-[#CDE4E6] text-xs font-medium border border-[#CDE4E6]/20 transition-all flex items-center justify-center gap-1.5"
+        >
+          <span>⚡ Continue in Local Mode</span>
+        </button>
+      </div>
     </div>
   );
 }

@@ -63,6 +63,43 @@ export const VALID_VARIABLE_DATA_TYPES: ReadonlySet<string> = new Set([
   'any',
 ]);
 
+export const SAFE_URL_SCHEMES: ReadonlySet<string> = new Set(['http:', 'https:', 'about:']);
+
+/**
+ * Validates whether a URL uses an approved, safe scheme for browser automation.
+ * Explicitly rejects javascript:, data:, file:, chrome:, and other dangerous schemes.
+ */
+export function isSafeUrl(rawUrl: string): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  const trimmed = rawUrl.trim();
+  if (trimmed === 'about:blank') return true;
+  if (trimmed.startsWith('/') || trimmed.startsWith('#')) return true;
+
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.startsWith('javascript:') ||
+    lower.startsWith('data:') ||
+    lower.startsWith('file:') ||
+    lower.startsWith('chrome:') ||
+    lower.startsWith('chrome-extension:') ||
+    lower.startsWith('vbscript:') ||
+    lower.startsWith('blob:')
+  ) {
+    return false;
+  }
+
+  if (trimmed.includes('{{') && trimmed.includes('}}')) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    return SAFE_URL_SCHEMES.has(parsed.protocol.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 export interface ValidationError {
   field: string;
   message: string;
@@ -226,6 +263,13 @@ export function validateWorkflowStep(
       workflowId,
       stepIndex: index,
     });
+  } else if (!isSafeUrl(s.url)) {
+    errors.push({
+      field: `steps[${index}].url`,
+      message: `Step at index ${index} contains unsupported or dangerous URL scheme: '${s.url}'`,
+      workflowId,
+      stepIndex: index,
+    });
   }
 
   // sequence validation
@@ -300,6 +344,17 @@ export function validateWorkflowStep(
       workflowId,
       stepIndex: index,
     });
+  }
+
+  if (s.layout !== undefined && s.layout !== null) {
+    if (typeof s.layout !== 'object' || typeof (s.layout as any).x !== 'number' || typeof (s.layout as any).y !== 'number') {
+      errors.push({
+        field: `steps[${index}].layout`,
+        message: `Step at index ${index} layout must have numeric 'x' and 'y' coordinates`,
+        workflowId,
+        stepIndex: index,
+      });
+    }
   }
 
   return errors;
@@ -956,14 +1011,23 @@ export function normalizeWorkflow(raw: unknown): Workflow {
     };
 
     if (typeof s.title === 'string') step.title = s.title;
+    if (typeof s.description === 'string') step.description = s.description;
     if (s.target && typeof s.target === 'object') step.target = s.target as TargetDescriptor;
     if (s.position && typeof s.position === 'object') step.position = s.position as Position;
     if (s.value !== undefined) step.value = s.value === null ? null : String(s.value);
     if (typeof s.sensitive === 'boolean') step.sensitive = s.sensitive;
     if (typeof s.key === 'string') step.key = s.key;
     if (s.verification && typeof s.verification === 'object') step.verification = s.verification as any;
+    if (s.postcondition && typeof s.postcondition === 'object') step.postcondition = s.postcondition as any;
     if (s.extraction && typeof s.extraction === 'object') step.extraction = s.extraction as any;
     if (s.condition && typeof s.condition === 'object') step.condition = s.condition as any;
+    if (s.layout && typeof s.layout === 'object') {
+      const lay = s.layout as Record<string, unknown>;
+      if (typeof lay.x === 'number' && typeof lay.y === 'number') {
+        step.layout = { x: lay.x, y: lay.y };
+      }
+    }
+    if (typeof s.componentId === 'string') step.componentId = s.componentId;
 
     return step;
   });
@@ -1021,6 +1085,195 @@ export function normalizeWorkflow(raw: unknown): Workflow {
     normalized.settings = r.settings as any;
   }
 
+  if (typeof r.templateId === 'string') {
+    normalized.templateId = r.templateId;
+  }
+
+  if (typeof r.isComponent === 'boolean') {
+    normalized.isComponent = r.isComponent;
+  }
+
+  if (r.componentMeta && typeof r.componentMeta === 'object') {
+    normalized.componentMeta = r.componentMeta as any;
+  }
+
   assertValidWorkflow(normalized);
   return normalized;
+}
+
+export interface GraphValidationResult {
+  valid: boolean;
+  errors: ValidationError[];
+  warnings: string[];
+  executionOrder: string[];
+  unreachableStepIds: string[];
+  hasCycle: boolean;
+}
+
+/**
+ * Performs static graph and dependency validation on a workflow.
+ * Validates branch destinations, variable references, reachability, cycles, and URL schemes.
+ */
+export function validateWorkflowGraph(workflow: Workflow): GraphValidationResult {
+  const errors: ValidationError[] = [];
+  const warnings: string[] = [];
+  const stepMap = new Map<string, WorkflowStep>();
+  const stepIds = new Set<string>();
+
+  for (const step of workflow.steps || []) {
+    stepMap.set(step.id, step);
+    stepIds.add(step.id);
+  }
+
+  // 1. Check branch destinations
+  for (let i = 0; i < (workflow.steps || []).length; i++) {
+    const step = workflow.steps[i];
+    if (step.condition) {
+      if (step.condition.onTrue && step.condition.onTrue !== 'next' && step.condition.onTrue !== 'end') {
+        if (!stepIds.has(step.condition.onTrue)) {
+          errors.push({
+            field: `steps[${i}].condition.onTrue`,
+            message: `Branch onTrue target '${step.condition.onTrue}' does not exist in workflow`,
+            workflowId: workflow.id,
+            stepIndex: i,
+          });
+        }
+      }
+      if (step.condition.onFalse && step.condition.onFalse !== 'next' && step.condition.onFalse !== 'end') {
+        if (!stepIds.has(step.condition.onFalse)) {
+          errors.push({
+            field: `steps[${i}].condition.onFalse`,
+            message: `Branch onFalse target '${step.condition.onFalse}' does not exist in workflow`,
+            workflowId: workflow.id,
+            stepIndex: i,
+          });
+        }
+      }
+    }
+  }
+
+  // 2. Validate variable template references ({{varName}})
+  const declaredVariables = new Set<string>((workflow.variables || []).map((v) => v.name));
+  const datasetColumns = new Set<string>(workflow.datasetConfig?.columns || []);
+  const availableVariables = new Set<string>([...declaredVariables, ...datasetColumns]);
+
+  const varRegex = /\{\{([a-zA-Z0-9_.-]+)\}\}/g;
+  for (let i = 0; i < (workflow.steps || []).length; i++) {
+    const step = workflow.steps[i];
+    const checkString = (str?: string | null, fieldName = 'value') => {
+      if (!str) return;
+      let match: RegExpExecArray | null;
+      varRegex.lastIndex = 0;
+      while ((match = varRegex.exec(str)) !== null) {
+        const varName = match[1];
+        if (!availableVariables.has(varName)) {
+          errors.push({
+            field: `steps[${i}].${fieldName}`,
+            message: `Step ${i + 1} (${step.title || step.type}) references undefined variable '{{${varName}}}'`,
+            workflowId: workflow.id,
+            stepIndex: i,
+          });
+        }
+      }
+    };
+
+    checkString(step.value, 'value');
+    checkString(step.url, 'url');
+    checkString(step.target?.selector, 'target.selector');
+
+    if (step.url && (step.url.toLowerCase().startsWith('javascript:') || step.url.toLowerCase().startsWith('data:'))) {
+      errors.push({
+        field: `steps[${i}].url`,
+        message: `Step ${i + 1} has unsupported URL scheme: ${step.url.split(':')[0]}`,
+        workflowId: workflow.id,
+        stepIndex: i,
+      });
+    }
+
+    if (step.condition && step.condition.source === 'variable' && step.condition.name) {
+      if (!availableVariables.has(step.condition.name)) {
+        errors.push({
+          field: `steps[${i}].condition.name`,
+          message: `Step ${i + 1} condition references undefined variable '${step.condition.name}'`,
+          workflowId: workflow.id,
+          stepIndex: i,
+        });
+      }
+    }
+
+    if (step.extraction?.variableName) {
+      availableVariables.add(step.extraction.variableName);
+    }
+  }
+
+  // 3. Reachability analysis & cycle detection
+  const visited = new Set<string>();
+  const executionOrder: string[] = [];
+  const inStack = new Set<string>();
+  let hasCycle = false;
+
+  const traverse = (stepId: string) => {
+    if (!stepMap.has(stepId)) return;
+    if (inStack.has(stepId)) {
+      hasCycle = true;
+      errors.push({
+        field: 'steps',
+        message: `Workflow contains an unsupported cycle or loop involving step '${stepId}'`,
+        workflowId: workflow.id,
+      });
+      warnings.push(`Workflow contains a loop or cycle involving step '${stepId}'`);
+      return;
+    }
+    if (visited.has(stepId)) return;
+
+    visited.add(stepId);
+    inStack.add(stepId);
+    executionOrder.push(stepId);
+
+    const step = stepMap.get(stepId)!;
+    const currentIndex = workflow.steps.findIndex((s) => s.id === stepId);
+
+    if (step.condition) {
+      if (step.condition.onTrue && step.condition.onTrue !== 'end') {
+        const nextId = step.condition.onTrue === 'next'
+          ? workflow.steps[currentIndex + 1]?.id
+          : step.condition.onTrue;
+        if (nextId) traverse(nextId);
+      }
+      if (step.condition.onFalse && step.condition.onFalse !== 'end') {
+        const nextId = step.condition.onFalse === 'next'
+          ? workflow.steps[currentIndex + 1]?.id
+          : step.condition.onFalse;
+        if (nextId) traverse(nextId);
+      }
+    } else {
+      const nextStep = workflow.steps[currentIndex + 1];
+      if (nextStep) {
+        traverse(nextStep.id);
+      }
+    }
+
+    inStack.delete(stepId);
+  };
+
+  if ((workflow.steps || []).length > 0) {
+    traverse(workflow.steps[0].id);
+  }
+
+  const unreachableStepIds = (workflow.steps || [])
+    .filter((s) => !visited.has(s.id))
+    .map((s) => s.id);
+
+  if (unreachableStepIds.length > 0) {
+    warnings.push(`Workflow contains ${unreachableStepIds.length} unreachable step(s): ${unreachableStepIds.join(', ')}`);
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+    executionOrder,
+    unreachableStepIds,
+    hasCycle,
+  };
 }

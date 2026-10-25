@@ -8,29 +8,62 @@ import { PostconditionEvaluator } from './PostconditionEvaluator';
 import { sanitizeDiagnosticText } from './session/ReplaySessionStorage';
 
 /**
- * Determines if an action type is intrinsically idempotent to repeat.
+ * Explicit classification of action safety and side-effect retry semantics.
  */
-export function isActionIdempotent(type: ActionType): boolean {
-  switch (type) {
-    case 'input':
-    case 'checkbox':
-    case 'radio':
-    case 'select':
-    case 'scroll':
-    case 'wait':
-    case 'navigate':
-      return true;
-    case 'click':
-    case 'keydown':
-    case 'keypress':
-    case 'drag':
-    case 'copy':
-    case 'paste':
-    case 'video_interaction':
-    case 'video':
-    default:
-      return false;
+export type ActionSafetyCategory =
+  | 'SET_VALUE_KNOWN_STATE'   // input, select, radio, checkbox with explicit boolean value
+  | 'TOGGLE_STATE'            // checkbox toggle without explicit boolean value
+  | 'EXTERNAL_SIDE_EFFECT'    // clicks on buttons/links/submits, keypress Enter, drag, navigation
+  | 'READ_ONLY_SAFE'          // wait, scroll, extract, condition
+  | 'UNCERTAIN_SIDE_EFFECT';
+
+export function classifyActionSafety(stepOrType: ActionType | WorkflowStep): ActionSafetyCategory {
+  if (typeof stepOrType === 'string') {
+    switch (stepOrType) {
+      case 'wait':
+      case 'scroll':
+      case 'extract':
+      case 'condition':
+        return 'READ_ONLY_SAFE';
+      case 'input':
+      case 'radio':
+      case 'select':
+      case 'checkbox':
+      case 'navigate':
+        return 'SET_VALUE_KNOWN_STATE';
+      case 'click':
+      case 'keydown':
+      case 'keypress':
+      case 'drag':
+      default:
+        return 'EXTERNAL_SIDE_EFFECT';
+    }
   }
+
+  const step = stepOrType;
+  if (step.type === 'wait' || step.type === 'scroll' || step.type === 'extract' || step.type === 'condition') {
+    return 'READ_ONLY_SAFE';
+  }
+  if (step.type === 'input' || step.type === 'radio' || step.type === 'select' || step.type === 'navigate') {
+    return 'SET_VALUE_KNOWN_STATE';
+  }
+  if (step.type === 'checkbox') {
+    return (step.value === 'true' || step.value === 'false')
+      ? 'SET_VALUE_KNOWN_STATE'
+      : 'TOGGLE_STATE';
+  }
+  return 'EXTERNAL_SIDE_EFFECT';
+}
+
+/**
+ * Determines if an action type or step is intrinsically safe to repeat.
+ * Setting a value to a known state (or read-only actions) is safe to repeat.
+ * State toggles and external side effects (e.g. clicks, form submissions)
+ * are NEVER safe to automatically retry without evidence that prior operation didn't take effect.
+ */
+export function isActionIdempotent(stepOrType: ActionType | WorkflowStep): boolean {
+  const category = classifyActionSafety(stepOrType);
+  return category === 'SET_VALUE_KNOWN_STATE' || category === 'READ_ONLY_SAFE';
 }
 
 /**
@@ -319,7 +352,7 @@ export class ActionVerifier {
   ): Promise<VerificationResult> {
     const startedAt = Date.now();
     const actionId = context?.actionId || `${context?.sessionId || 'sess'}_step${step.sequence}_attempt0`;
-    const idempotent = isActionIdempotent(step.type);
+    const idempotent = isActionIdempotent(step);
 
     try {
       const outcome = await PostconditionEvaluator.evaluate(

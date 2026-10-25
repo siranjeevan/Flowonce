@@ -3,6 +3,8 @@ import { RESERVED_SYSTEM_VARS } from '../VariableContext';
 export interface DatasetParseOptions {
   maxRows?: number;
   maxSizeBytes?: number;
+  maxColumns?: number;
+  maxFieldLength?: number;
   requiredColumns?: string[];
 }
 
@@ -22,6 +24,23 @@ export class DatasetParseError extends Error {
 
 const DEFAULT_MAX_ROWS = 5000;
 const DEFAULT_MAX_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
+const DEFAULT_MAX_COLUMNS = 100;
+const DEFAULT_MAX_FIELD_LENGTH = 32 * 1024; // 32 KB per field
+const MAX_JSON_DEPTH = 6;
+
+function checkJsonNestingDepth(val: unknown, currentDepth = 1, maxDepth = MAX_JSON_DEPTH): void {
+  if (currentDepth > maxDepth) {
+    throw new DatasetParseError(`JSON data exceeds maximum allowable nesting depth of ${maxDepth} levels`);
+  }
+  if (val && typeof val === 'object') {
+    for (const k of Object.keys(val as Record<string, unknown>)) {
+      const child = (val as Record<string, unknown>)[k];
+      if (child && typeof child === 'object') {
+        checkJsonNestingDepth(child, currentDepth + 1, maxDepth);
+      }
+    }
+  }
+}
 
 /**
  * Robust CSV and JSON parser with RFC 4180 compliance,
@@ -41,7 +60,10 @@ export class DatasetParser {
       throw new DatasetParseError(`CSV exceeds maximum size limit of ${maxSizeBytes} bytes`);
     }
 
-    const rawRows = this.tokenizeCSV(csvContent);
+    const maxColumns = options.maxColumns || DEFAULT_MAX_COLUMNS;
+    const maxFieldLength = options.maxFieldLength || DEFAULT_MAX_FIELD_LENGTH;
+
+    const rawRows = this.tokenizeCSV(csvContent, maxFieldLength, maxColumns);
     if (rawRows.length === 0) {
       throw new DatasetParseError('CSV contains no data rows');
     }
@@ -68,6 +90,10 @@ export class DatasetParser {
 
     if (columns.length === 0) {
       throw new DatasetParseError('CSV must define at least one header column');
+    }
+
+    if (columns.length > maxColumns) {
+      throw new DatasetParseError(`CSV column count (${columns.length}) exceeds maximum limit of ${maxColumns} columns`);
     }
 
     // Verify required columns if configured
@@ -133,6 +159,8 @@ export class DatasetParser {
       rawData = jsonContent;
     }
 
+    checkJsonNestingDepth(rawData);
+
     let rawList: unknown[];
     if (Array.isArray(rawData)) {
       rawList = rawData;
@@ -158,6 +186,9 @@ export class DatasetParser {
       throw new DatasetParseError(`JSON dataset exceeds allowed limit of ${maxRows} records`);
     }
 
+    const maxColumns = options.maxColumns || DEFAULT_MAX_COLUMNS;
+    const maxFieldLength = options.maxFieldLength || DEFAULT_MAX_FIELD_LENGTH;
+
     // Collect all column names across objects
     const seenCols = new Set<string>();
     const columns: string[] = [];
@@ -182,6 +213,10 @@ export class DatasetParser {
       throw new DatasetParseError('JSON records contain no key-value pairs');
     }
 
+    if (columns.length > maxColumns) {
+      throw new DatasetParseError(`JSON dataset column count (${columns.length}) exceeds maximum limit of ${maxColumns} columns`);
+    }
+
     if (options.requiredColumns) {
       for (const reqCol of options.requiredColumns) {
         if (!seenCols.has(reqCol)) {
@@ -198,10 +233,19 @@ export class DatasetParser {
         const val = obj[col];
         if (val === undefined || val === null) {
           record[col] = null;
-        } else if (typeof val === 'boolean' || typeof val === 'number' || typeof val === 'string') {
+        } else if (typeof val === 'boolean' || typeof val === 'number') {
+          record[col] = val;
+        } else if (typeof val === 'string') {
+          if (val.length > maxFieldLength) {
+            throw new DatasetParseError(`Field "${col}" exceeds maximum allowed length of ${maxFieldLength} characters`);
+          }
           record[col] = val;
         } else {
-          record[col] = JSON.stringify(val);
+          const stringified = JSON.stringify(val);
+          if (stringified.length > maxFieldLength) {
+            throw new DatasetParseError(`Field "${col}" exceeds maximum allowed length of ${maxFieldLength} characters`);
+          }
+          record[col] = stringified;
         }
       }
       records.push(record);
@@ -219,9 +263,13 @@ export class DatasetParser {
 
   /**
    * RFC 4180 compliant CSV tokenizer supporting quotes, escaped quotes,
-   * commas, and multiline values.
+   * commas, multiline values, and bounded resource limits.
    */
-  private static tokenizeCSV(text: string): string[][] {
+  private static tokenizeCSV(
+    text: string,
+    maxFieldLength = DEFAULT_MAX_FIELD_LENGTH,
+    maxColumns = DEFAULT_MAX_COLUMNS
+  ): string[][] {
     const rows: string[][] = [];
     let currentRow: string[] = [];
     let currentField = '';
@@ -237,6 +285,9 @@ export class DatasetParser {
           // Check for escaped quote ("")
           if (i + 1 < len && text[i + 1] === '"') {
             currentField += '"';
+            if (currentField.length > maxFieldLength) {
+              throw new DatasetParseError(`CSV field exceeds maximum allowed length of ${maxFieldLength} characters`);
+            }
             i += 2;
             continue;
           } else {
@@ -247,6 +298,9 @@ export class DatasetParser {
           }
         } else {
           currentField += char;
+          if (currentField.length > maxFieldLength) {
+            throw new DatasetParseError(`CSV field exceeds maximum allowed length of ${maxFieldLength} characters`);
+          }
           i++;
           continue;
         }
@@ -256,6 +310,9 @@ export class DatasetParser {
           i++;
           continue;
         } else if (char === ',') {
+          if (currentRow.length >= maxColumns) {
+            throw new DatasetParseError(`CSV row exceeds maximum limit of ${maxColumns} columns`);
+          }
           currentRow.push(currentField);
           currentField = '';
           i++;
@@ -265,6 +322,9 @@ export class DatasetParser {
           if (i + 1 < len && text[i + 1] === '\n') {
             i++;
           }
+          if (currentRow.length >= maxColumns) {
+            throw new DatasetParseError(`CSV row exceeds maximum limit of ${maxColumns} columns`);
+          }
           currentRow.push(currentField);
           currentField = '';
           rows.push(currentRow);
@@ -272,6 +332,9 @@ export class DatasetParser {
           i++;
           continue;
         } else if (char === '\n') {
+          if (currentRow.length >= maxColumns) {
+            throw new DatasetParseError(`CSV row exceeds maximum limit of ${maxColumns} columns`);
+          }
           currentRow.push(currentField);
           currentField = '';
           rows.push(currentRow);
@@ -280,6 +343,9 @@ export class DatasetParser {
           continue;
         } else {
           currentField += char;
+          if (currentField.length > maxFieldLength) {
+            throw new DatasetParseError(`CSV field exceeds maximum allowed length of ${maxFieldLength} characters`);
+          }
           i++;
           continue;
         }
@@ -292,6 +358,9 @@ export class DatasetParser {
     }
 
     if (currentField.length > 0 || currentRow.length > 0) {
+      if (currentRow.length >= maxColumns) {
+        throw new DatasetParseError(`CSV row exceeds maximum limit of ${maxColumns} columns`);
+      }
       currentRow.push(currentField);
       rows.push(currentRow);
     }

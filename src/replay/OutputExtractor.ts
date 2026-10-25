@@ -1,5 +1,4 @@
-import type { OutputExtractionConfig, ExtractionType, TargetDescriptor } from '../shared/types/workflow';
-import { TargetResolver } from './TargetResolver';
+import type { OutputExtractionConfig, ExtractionType } from '../shared/types/workflow';
 import { WaitManager } from './WaitManager';
 
 export interface ExtractionResult {
@@ -36,28 +35,30 @@ export class OutputExtractor {
   ): Promise<ExtractionResult> {
     const startedAt = Date.now();
     const timeoutMs = Math.min(Math.max(config.timeoutMs || 5000, 100), 30000);
+    const type: ExtractionType = config.type || (config as any).extractionType;
+    const extractionId: string = config.id || `ext_${Date.now()}`;
 
     // 1. Browser-level extractions that do not require an element
-    if (config.type === 'document_title') {
+    if (type === 'document_title') {
       const title = typeof document !== 'undefined' ? document.title : '';
       return {
         success: true,
-        extractionId: config.id,
+        extractionId,
         variableName: config.variableName,
         value: title,
-        extractionType: config.type,
+        extractionType: type,
         diagnosticInfo: `Extracted document title: "${options?.isSensitive ? '••••••••' : title}"`,
       };
     }
 
-    if (config.type === 'current_url') {
+    if (type === 'current_url') {
       const url = typeof window !== 'undefined' ? window.location.href : '';
       return {
         success: true,
-        extractionId: config.id,
+        extractionId,
         variableName: config.variableName,
         value: url,
-        extractionType: config.type,
+        extractionType: type,
         diagnosticInfo: `Extracted current URL: "${options?.isSensitive ? '••••••••' : url}"`,
       };
     }
@@ -66,11 +67,11 @@ export class OutputExtractor {
     if (!config.target) {
       return {
         success: false,
-        extractionId: config.id,
+        extractionId,
         variableName: config.variableName,
         value: null,
-        extractionType: config.type,
-        error: `Extraction "${config.id}" requires a target descriptor for type "${config.type}"`,
+        extractionType: type,
+        error: `Extraction "${extractionId}" requires a target descriptor for type "${type}"`,
         diagnosticInfo: 'Target descriptor missing in extraction config',
       };
     }
@@ -78,21 +79,21 @@ export class OutputExtractor {
     // 3. Wait for element to appear and be ready
     let el: HTMLElement | null = null;
     try {
-      el = await WaitManager.waitForElement(config.target, {
-        timeout: timeoutMs,
+      el = (await WaitManager.waitForElement(config.target, {
+        timeoutMs: timeoutMs,
         signal: options?.signal,
         sessionId: options?.sessionId,
         workflowId: options?.workflowId,
         stepIndex: options?.stepIndex,
-      });
+      })) as HTMLElement;
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Timeout waiting for extraction target';
       return {
         success: false,
-        extractionId: config.id,
+        extractionId,
         variableName: config.variableName,
         value: null,
-        extractionType: config.type,
+        extractionType: type,
         error: errorMsg,
         diagnosticInfo: `Target element not found within ${timeoutMs}ms for variable "${config.variableName}"`,
       };
@@ -101,38 +102,38 @@ export class OutputExtractor {
     if (!el) {
       return {
         success: false,
-        extractionId: config.id,
+        extractionId,
         variableName: config.variableName,
         value: null,
-        extractionType: config.type,
-        error: `Target element for extraction "${config.id}" was null`,
+        extractionType: type,
+        error: `Target element for extraction "${extractionId}" was null`,
         diagnosticInfo: 'Element resolution returned null',
       };
     }
 
     // 4. Extract value based on type
     try {
-      const extractedValue = this.extractValueFromElement(el, config.type, config.attributeName);
+      const extractedValue = this.extractValueFromElement(el, type, config.attributeName);
       const displayVal = options?.isSensitive ? '••••••••' : String(extractedValue);
 
       return {
         success: true,
-        extractionId: config.id,
+        extractionId,
         variableName: config.variableName,
         value: extractedValue,
-        extractionType: config.type,
-        diagnosticInfo: `Successfully extracted ${config.type} = "${displayVal}" in ${Date.now() - startedAt}ms`,
+        extractionType: type,
+        diagnosticInfo: `Successfully extracted ${type} = "${displayVal}" in ${Date.now() - startedAt}ms`,
       };
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Extraction error';
       return {
         success: false,
-        extractionId: config.id,
+        extractionId,
         variableName: config.variableName,
         value: null,
-        extractionType: config.type,
+        extractionType: type,
         error: errorMsg,
-        diagnosticInfo: `Failed to extract ${config.type} from element: ${errorMsg}`,
+        diagnosticInfo: `Failed to extract ${type} from element: ${errorMsg}`,
       };
     }
   }

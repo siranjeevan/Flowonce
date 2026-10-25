@@ -1,6 +1,6 @@
 import type { StepConditionConfig, ConditionOperator } from '../shared/types/workflow';
 import type { VariableContext } from './VariableContext';
-import type { VerificationResult, VerificationStatus } from './verification-types';
+import type { VerificationResult } from './verification-types';
 
 export interface ConditionEvaluationResult {
   matched: boolean;
@@ -32,14 +32,25 @@ export class ConditionEvaluator {
     config: StepConditionConfig,
     variableContext: VariableContext,
     lastVerification?: VerificationResult | null,
-    stepVerifications: Map<string, VerificationResult> = new Map()
+    stepVerifications: Map<string, VerificationResult> | { id: string }[] = new Map(),
+    steps?: { id: string }[]
   ): ConditionEvaluationResult {
     if (!config || !config.source || !config.operator) {
       throw new ConditionEvaluationError('Invalid condition configuration: missing source or operator');
     }
 
+    // Support stepVerifications being passed or omitted when steps array is passed as 4th arg
+    let verificationsMap = new Map<string, VerificationResult>();
+    let stepList = steps;
+    if (Array.isArray(stepVerifications)) {
+      stepList = stepVerifications;
+    } else if (stepVerifications instanceof Map) {
+      verificationsMap = stepVerifications;
+    }
+
     let actualValue: unknown;
-    let operandName = config.name;
+    const operandName = config.name || (config as any).variableName;
+    const expectedValue = config.value !== undefined ? config.value : (config as any).expectedValue;
 
     if (config.source === 'variable') {
       if (!operandName) {
@@ -48,8 +59,8 @@ export class ConditionEvaluator {
       actualValue = variableContext.get(operandName);
     } else if (config.source === 'verification') {
       // If a specific step is named, lookup that step's verification result, otherwise use lastVerification
-      if (operandName && stepVerifications.has(operandName)) {
-        const res = stepVerifications.get(operandName);
+      if (operandName && verificationsMap.has(operandName)) {
+        const res = verificationsMap.get(operandName);
         actualValue = res ? res.status : 'SKIPPED';
       } else {
         actualValue = lastVerification ? lastVerification.status : 'SKIPPED';
@@ -58,25 +69,37 @@ export class ConditionEvaluator {
       throw new ConditionEvaluationError(`Unsupported condition source: "${String(config.source)}"`);
     }
 
-    const matched = this.evaluateOperator(config.operator, actualValue, config.value);
+    const matched = this.evaluateOperator(config.operator, actualValue, expectedValue);
 
     // Determine target branch
-    const targetBranch = matched
+    let targetBranch = matched
       ? (config.onTrue || 'next')
       : (config.onFalse || 'next');
 
-    const diagnosticInfo = `Condition [${config.source}:${operandName || 'last'}] (${config.operator} ${JSON.stringify(config.value)}) evaluated to ${matched ? 'TRUE' : 'FALSE'}. Actual: ${JSON.stringify(actualValue)}. Branch target: "${targetBranch}".`;
+    if (stepList && stepList.length > 0) {
+      targetBranch = this.resolveBranchTarget(targetBranch, stepList);
+    }
+
+    const diagnosticInfo = `Condition [${config.source}:${operandName || 'last'}] (${config.operator} ${JSON.stringify(expectedValue)}) evaluated to ${matched ? 'TRUE' : 'FALSE'}. Actual: ${JSON.stringify(actualValue)}. Branch target: "${targetBranch}".`;
 
     return {
       matched,
       source: config.source,
       operandName,
       actualValue,
-      expectedValue: config.value,
+      expectedValue,
       operator: config.operator,
       targetBranch,
       diagnosticInfo,
     };
+  }
+
+  /**
+   * Resolves branch target safely against workflow steps.
+   */
+  public static resolveBranchTarget(target: string | undefined, steps: { id: string }[] = []): string {
+    if (!target || target === 'next' || target === 'end') return target || 'next';
+    return steps.some(s => s.id === target) ? target : 'next';
   }
 
   /**
@@ -108,19 +131,37 @@ export class ConditionEvaluator {
         if (actual === null) {
           return expected === null;
         }
-        // Strict number comparison
-        if (typeof actual === 'number' || typeof expected === 'number') {
-          const numA = Number(actual);
+
+        // If types match exactly
+        if (typeof actual === typeof expected) {
+          return actual === expected;
+        }
+
+        // Numeric comparison only when string is a non-empty numeric literal (e.g. "42" vs 42)
+        if (typeof actual === 'number' && typeof expected === 'string') {
+          if (expected.trim() === '') return false;
           const numB = Number(expected);
-          if (!isNaN(numA) && !isNaN(numB)) {
-            return numA === numB;
-          }
+          return !isNaN(numB) && actual === numB;
         }
-        // Strict boolean comparison
-        if (typeof actual === 'boolean' || typeof expected === 'boolean') {
-          return Boolean(actual) === Boolean(expected);
+        if (typeof actual === 'string' && typeof expected === 'number') {
+          if (actual.trim() === '') return false;
+          const numA = Number(actual);
+          return !isNaN(numA) && numA === expected;
         }
-        return String(actual) === String(expected);
+
+        // Boolean comparison only when string is explicit "true"/"false"
+        if (typeof actual === 'boolean' && typeof expected === 'string') {
+          if (expected === 'true') return actual === true;
+          if (expected === 'false') return actual === false;
+          return false;
+        }
+        if (typeof actual === 'string' && typeof expected === 'boolean') {
+          if (actual === 'true') return expected === true;
+          if (actual === 'false') return expected === false;
+          return false;
+        }
+
+        return actual === expected;
       }
 
       case 'not_equals': {

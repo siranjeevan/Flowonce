@@ -31,7 +31,8 @@
     "activeTab",
     "scripting",
     "tabs",
-    "debugger"
+    "debugger",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"

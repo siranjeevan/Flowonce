@@ -99,6 +99,7 @@ export interface WorkflowStep {
   timestamp: number;
   url: string;
   title?: string;
+  description?: string;
   target?: TargetDescriptor;
   position?: Position;
   value?: string | null;
@@ -106,8 +107,11 @@ export interface WorkflowStep {
   key?: string;
   sequence: number;
   verification?: StepVerificationConfig;
+  postcondition?: any;
   extraction?: OutputExtractionConfig;
   condition?: StepConditionConfig;
+  layout?: { x: number; y: number };
+  componentId?: string;
 }
 
 export type VariableDataType = 'string' | 'number' | 'boolean' | 'null' | 'any';
@@ -123,6 +127,12 @@ export interface WorkflowVariable {
 
 export interface WorkflowDatasetConfig {
   defaultSourceType?: 'csv' | 'json';
+  sourceType?: 'inline_csv' | 'inline_json' | 'storage_ref';
+  rawContent?: string;
+  records?: Record<string, string | number | boolean | null>[];
+  columns?: string[];
+  totalRecords?: number;
+  contentFingerprint?: string;
   requiredColumns?: string[];
   maxRows?: number;
 }
@@ -142,7 +152,14 @@ export interface Workflow {
   steps: WorkflowStep[];
   variables: WorkflowVariable[];
   datasetConfig?: WorkflowDatasetConfig;
+  dataset?: WorkflowDatasetConfig;
   settings?: WorkflowSettings;
   createdAt: string;
   updatedAt: string;
+  templateId?: string;
+  isComponent?: boolean;
+  componentMeta?: {
+    inputs?: WorkflowVariable[];
+    outputs?: string[];
+  };
 }
