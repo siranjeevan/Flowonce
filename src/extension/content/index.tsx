@@ -662,14 +662,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
         activeStepAbortController = null;
         if (execResult.success) {
-          sendResponse({
-            success: true,
-            actionId,
-            verification: execResult.verification,
-            extractedValue: execResult.extractedValue,
-            navigationTriggered: execResult.navigationTriggered,
-            navigatedTo: execResult.navigatedTo,
-          });
+          try {
+            sendResponse({
+              success: true,
+              actionId,
+              verification: execResult.verification,
+              extractedValue: execResult.extractedValue,
+              navigationTriggered: execResult.navigationTriggered,
+              navigatedTo: execResult.navigatedTo,
+            });
+          } catch {}
         } else {
           if (execResult.verification?.status === 'OUTCOME_UNKNOWN') {
             showReplayUncertain(
@@ -680,20 +682,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             const errorMsg = execResult.error || 'Action verification failed';
             showReplayError(errorMsg);
           }
-          sendResponse({
-            success: false,
-            actionId,
-            verification: execResult.verification,
-            error: execResult.error,
-            code: execResult.code,
-          });
+          try {
+            sendResponse({
+              success: false,
+              actionId,
+              verification: execResult.verification,
+              error: execResult.error,
+              code: execResult.code,
+            });
+          } catch {}
         }
       })
       .catch((err) => {
         activeStepAbortController = null;
         const errorMsg = err?.message || 'Execution failed';
         showReplayError(errorMsg);
-        sendResponse({ success: false, error: errorMsg, code: err?.code });
+        try {
+          sendResponse({ success: false, error: errorMsg, code: err?.code });
+        } catch {}
       });
     return true; // Keep message channel open for async response
   } else if (message.type === 'HIDE_REPLAY_INDICATOR') {

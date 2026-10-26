@@ -274,34 +274,24 @@ export class ActionVerifier {
       }
 
       case 'click': {
-        // If target was a link with href, check navigation
-        const link = targetElement?.closest('a') as HTMLAnchorElement | null;
-        if (link && link.href && !link.href.startsWith('javascript:')) {
-          const postcondition: PostconditionDescriptor = {
-            type: 'url_changed',
+        // If target was or is inside an anchor link with href, acknowledge immediately
+        // so sendResponse is transmitted to the background orchestrator before page unload.
+        const link = (targetElement?.closest('a') as HTMLAnchorElement | null) || (targetElement instanceof HTMLAnchorElement ? targetElement : null);
+        if (link && link.href && !link.href.startsWith('javascript:') && !link.href.startsWith('#')) {
+          return {
+            verificationId,
+            sessionId: context?.sessionId,
+            actionId,
+            actionType: step.type,
+            status: 'VERIFIED',
+            method: 'auto_link_navigation_detected',
+            startedAt,
+            completedAt: Date.now(),
+            elapsedMs: Date.now() - startedAt,
+            expectedCondition: 'Link click dispatched and navigation expected',
+            actualState: `Dispatched click to link targeting ${link.href}`,
+            retryEligibility: 'NONE',
           };
-          // Bounded short check for link navigation initiation
-          const outcome = await PostconditionEvaluator.evaluate(
-            postcondition,
-            context,
-            Math.min(timeoutMs, 2000)
-          );
-          if (outcome.satisfied) {
-            return {
-              verificationId,
-              sessionId: context?.sessionId,
-              actionId,
-              actionType: step.type,
-              status: 'VERIFIED',
-              method: 'auto_link_navigation_detected',
-              startedAt,
-              completedAt: Date.now(),
-              elapsedMs: outcome.elapsedMs,
-              expectedCondition: outcome.expectedCondition,
-              actualState: outcome.actualState,
-              retryEligibility: 'NONE',
-            };
-          }
         }
 
         // For clicks without an explicit postcondition configured:

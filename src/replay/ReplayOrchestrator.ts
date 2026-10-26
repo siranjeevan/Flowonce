@@ -1533,9 +1533,11 @@ export class ReplayOrchestrator {
 
           // Check if page navigated during interaction
           const isNavigation =
+            msg.includes('message channel closed') ||
             msg.includes('message port closed') ||
             msg.includes('Receiving end does not exist') ||
             msg.includes('Frame was removed') ||
+            msg.includes('Frame with ID') ||
             msg.includes('Could not establish connection');
 
           if (isNavigation) {
