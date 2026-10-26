@@ -20,6 +20,8 @@ export interface ExecutionResult {
   extractedValue?: { variableName: string; value: string | number | boolean | null };
   error?: string;
   code?: string;
+  navigationTriggered?: boolean;
+  navigatedTo?: string;
 }
 
 export class ActionExecutor {
@@ -305,11 +307,14 @@ export class ActionExecutor {
       initialValue,
     });
 
+    const navUrl = (el as any)?.__flowonce_nav;
     const isVerified = verification.status === 'VERIFIED';
     return {
       success: isVerified,
       verification,
       error: isVerified ? undefined : (verification.diagnosticInfo || verification.recoveryRecommendation || verification.error),
+      navigationTriggered: Boolean(navUrl),
+      navigatedTo: navUrl,
     };
   }
 
@@ -356,10 +361,25 @@ export class ActionExecutor {
     } catch {}
 
     // If target is or is inside an <a> link, ensure it navigates in the current tab
-    const link = el.closest('a') || (clickable instanceof HTMLAnchorElement ? clickable : null);
-    if (link && link.href && !link.href.startsWith('javascript:')) {
+    const link = (el.closest('a') as HTMLAnchorElement | null) || (clickable instanceof HTMLAnchorElement ? clickable : null);
+    if (link && link.href && !link.href.startsWith('javascript:') && !link.href.startsWith('#')) {
       if (link.target === '_blank') link.target = '_self';
       try { link.click(); } catch {}
+
+      // In SPAs and frameworks like GitHub Turbo, synthetic untrusted clicks are ignored by the framework.
+      // Record intended navigation destination so background orchestrator can coordinate navigation reliably:
+      try {
+        if (typeof window !== 'undefined' && window.location) {
+          const destUrl = new URL(link.href, window.location.href).href;
+          const currentUrl = window.location.href;
+          const cleanDest = destUrl.split('#')[0];
+          const cleanCurrent = currentUrl.split('#')[0];
+          if (cleanDest !== cleanCurrent) {
+            console.log(`[ActionExecutor] Target link navigates to ${destUrl}`);
+            (el as any).__flowonce_nav = destUrl;
+          }
+        }
+      } catch {}
     }
     
     return true;

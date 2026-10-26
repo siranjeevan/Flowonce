@@ -667,6 +667,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             actionId,
             verification: execResult.verification,
             extractedValue: execResult.extractedValue,
+            navigationTriggered: execResult.navigationTriggered,
+            navigatedTo: execResult.navigatedTo,
           });
         } else {
           if (execResult.verification?.status === 'OUTCOME_UNKNOWN') {

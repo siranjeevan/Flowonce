@@ -1231,39 +1231,57 @@ export class ReplayOrchestrator {
         throw new Error('No active browser tab found for replay');
       }
 
-      // Initial step navigation if URL is fundamentally different
-      if (stepIndex === 0 && preparedStep.url && currentTab.url && currentTab.id) {
+      // Step URL synchronization: ensure tab is on the expected URL before dispatching
+      if (preparedStep.url && currentTab && currentTab.id && currentTab.url) {
         if (!isSafeUrl(preparedStep.url)) {
           throw new Error(`Cannot navigate to unsafe URL scheme: ${preparedStep.url}`);
         }
         try {
-          const currentUrlObj = new URL(currentTab.url);
+          const tabId = currentTab.id;
+          // If tab is currently loading a prior navigation, wait for it first
+          if (currentTab.status === 'loading') {
+            this.activeSession.status = 'NAVIGATING';
+            await this.waitForTabLoad(tabId, 20000, this.abortController?.signal);
+            await WaitManager.wait(200, { signal: this.abortController?.signal });
+            currentTab = (await this.getTargetTab()) || currentTab;
+          }
+
+          const currentTabUrl = currentTab.url || '';
+          const currentUrlObj = new URL(currentTabUrl);
           const targetUrlObj = new URL(preparedStep.url);
+          const currentClean = (currentUrlObj.origin + currentUrlObj.pathname).replace(/\/+$/, '');
+          const targetClean = (targetUrlObj.origin + targetUrlObj.pathname).replace(/\/+$/, '');
+
           const isDifferentSite =
             currentUrlObj.origin !== targetUrlObj.origin ||
-            currentTab.url.startsWith('chrome://') ||
-            currentTab.url.startsWith('about:');
+            currentTabUrl.startsWith('chrome://') ||
+            currentTabUrl.startsWith('about:');
 
-          if (isDifferentSite) {
-            console.log(`[ReplayOrchestrator] Opening starting URL: ${preparedStep.url}`);
+          // If step 0 is on a different site, or a subsequent step expects a different page that wasn't reached:
+          const needsNavigation =
+            isDifferentSite ||
+            (stepIndex > 0 && currentClean !== targetClean && !currentClean.startsWith(targetClean));
+
+          if (needsNavigation) {
+            console.log(`[ReplayOrchestrator] Synchronizing tab to step URL: ${preparedStep.url}`);
             this.activeSession.status = 'NAVIGATING';
             this.activeSession.navigationPending = true;
             ReplaySessionStorage.appendEvent(
               this.activeSession,
               'NAVIGATION_STARTED',
-              `Navigating to initial URL: ${preparedStep.url}`
+              `Navigating to step URL: ${preparedStep.url}`
             );
             this.activeSession = await ReplaySessionStorage.saveSession(this.activeSession);
 
-            await chrome.tabs.update(currentTab.id, { url: preparedStep.url });
-            await this.waitForTabLoad(currentTab.id, 20000, this.abortController?.signal);
+            await chrome.tabs.update(tabId, { url: preparedStep.url });
+            await this.waitForTabLoad(tabId, 20000, this.abortController?.signal);
             await WaitManager.wait(300, { signal: this.abortController?.signal });
 
             this.activeSession.navigationPending = false;
             currentTab = (await this.getTargetTab()) || currentTab;
           }
         } catch (e: unknown) {
-          console.warn('[ReplayOrchestrator] Initial URL check warning:', e);
+          console.warn('[ReplayOrchestrator] Step URL check warning:', e);
         }
       }
 
@@ -1372,6 +1390,37 @@ export class ReplayOrchestrator {
               'ACTION_ACKNOWLEDGED',
               `Content script completed action for step ${stepIndex + 1}`
             );
+
+            // If action triggered navigation, synchronize tab load before proceeding to next step
+            if (result.navigationTriggered || result.navigatedTo) {
+              const targetNav = result.navigatedTo;
+              console.log(`[ReplayOrchestrator] Action triggered navigation to ${targetNav || 'next page'}. Synchronizing tab load...`);
+              this.activeSession.status = 'NAVIGATING';
+              this.activeSession.navigationPending = true;
+              await WaitManager.wait(200, { signal: this.abortController?.signal });
+              const freshTab = await this.getTargetTab();
+
+              if (freshTab && freshTab.id) {
+                // If the link did not trigger navigation natively (e.g. GitHub Turbo discarded untrusted synthetic click):
+                if (targetNav) {
+                  const currentClean = (freshTab.url || '').split('#')[0];
+                  const targetClean = targetNav.split('#')[0];
+                  if (currentClean !== targetClean) {
+                    console.log(`[ReplayOrchestrator] Forcing tab navigation to ${targetNav}`);
+                    try {
+                      await chrome.tabs.update(freshTab.id, { url: targetNav });
+                    } catch (e) {
+                      console.warn('[ReplayOrchestrator] Tab update warning:', e);
+                    }
+                  }
+                }
+
+                await this.waitForTabLoad(freshTab.id, 20000, this.abortController?.signal);
+                await WaitManager.wait(300, { signal: this.abortController?.signal });
+              }
+              this.activeSession.navigationPending = false;
+            }
+
             break;
           } else if (result?.verification?.status === 'OUTCOME_UNKNOWN') {
             console.warn(
@@ -1504,9 +1553,11 @@ export class ReplayOrchestrator {
 
             await WaitManager.wait(300, { signal: this.abortController?.signal });
             const freshTab = await this.getTargetTab();
-            if (freshTab && freshTab.id && freshTab.status === 'loading') {
-              await this.waitForTabLoad(freshTab.id, 20000, this.abortController?.signal);
-              await WaitManager.wait(200, { signal: this.abortController?.signal });
+            if (freshTab && freshTab.id) {
+              if (freshTab.status === 'loading') {
+                await this.waitForTabLoad(freshTab.id, 20000, this.abortController?.signal);
+                await WaitManager.wait(200, { signal: this.abortController?.signal });
+              }
               this.activeSession.navigationPending = false;
 
               // Action successfully triggered page navigation!

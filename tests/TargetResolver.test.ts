@@ -365,6 +365,79 @@ describe('Phase 4: Deterministic Target Resolution & Collision Prevention', () =
       expect(result.element).toBe(sendBtn);
       expect(result.isAmbiguous).toBeFalsy();
     });
+
+    it('19B. Duplicate navigation links to the exact same destination (like GitHub sidebar vs mobile drawer) resolve cleanly without reporting AMBIGUOUS', () => {
+      document.body.innerHTML = `
+        <aside class="sidebar">
+          <h2>Top repositories</h2>
+          <ul>
+            <li><a id="sidebar-repo" href="/siranjeevan/Git-puch-extension">siranjeevan/Git-puch-extension</a></li>
+          </ul>
+        </aside>
+        <div class="mobile-drawer">
+          <a id="drawer-repo" href="/siranjeevan/Git-puch-extension">siranjeevan/Git-puch-extension</a>
+        </div>
+      `;
+      const sidebarRepo = document.getElementById('sidebar-repo')!;
+
+      const result = TargetResolver.resolve({
+        tag: 'a',
+        href: '/siranjeevan/Git-puch-extension',
+        text: 'siranjeevan/Git-puch-extension',
+      });
+
+      expect(result.status).toBe('FOUND');
+      expect(result.element).not.toBeNull();
+      expect([sidebarRepo, document.getElementById('drawer-repo')!]).toContain(result.element);
+      expect(result.isAmbiguous).toBeFalsy();
+    });
+
+    it('19C. Elements inside closed <dialog> or [aria-hidden="true"] containers are excluded from competing candidates', () => {
+      document.body.innerHTML = `
+        <aside class="sidebar">
+          <a id="active-repo" href="/siranjeevan/Git-puch-extension">siranjeevan/Git-puch-extension</a>
+        </aside>
+        <dialog id="command-palette">
+          <a id="hidden-palette-repo" href="/siranjeevan/Git-puch-extension">siranjeevan/Git-puch-extension</a>
+        </dialog>
+      `;
+      const activeRepo = document.getElementById('active-repo')!;
+
+      const result = TargetResolver.resolve({
+        tag: 'a',
+        href: '/siranjeevan/Git-puch-extension',
+        text: 'siranjeevan/Git-puch-extension',
+      });
+
+      expect(result.status).toBe('FOUND');
+      expect(result.element).toBe(activeRepo);
+      expect(result.isAmbiguous).toBeFalsy();
+    });
+
+    it('19D. Specific repository link resolves to interactive anchor without AMBIGUOUS even when recorded without href and competing with query-builder/modal item', () => {
+      document.body.innerHTML = `
+        <aside class="sidebar">
+          <h2>Top repositories</h2>
+          <ul>
+            <li><a id="sidebar-repo" href="/siranjeevan/Git-puch-extension">siranjeevan/Git-puch-extension</a></li>
+          </ul>
+        </aside>
+        <div id="command-palette-pjax-container" class="qbsearch-modal">
+          <div role="option" id="modal-option">
+            <span>siranjeevan/Git-puch-extension</span>
+          </div>
+        </div>
+      `;
+      const sidebarRepo = document.getElementById('sidebar-repo')!;
+
+      const result = TargetResolver.resolve({
+        text: 'siranjeevan/Git-puch-extension',
+      });
+
+      expect(result.status).toBe('FOUND');
+      expect(result.element).toBe(sidebarRepo);
+      expect(result.isAmbiguous).toBeFalsy();
+    });
   });
 
   // =========================================================================

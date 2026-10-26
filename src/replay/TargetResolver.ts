@@ -396,6 +396,224 @@ export class TargetResolver {
         );
 
         if (tiedCandidates.length > 1) {
+          // --- Intelligent Disambiguation Pipeline ---
+
+          // 1. Identical Destination Tie-Breaker (e.g. GitHub sidebar vs mobile drawer / header links)
+          // If the recorded target has a link destination and candidates point to the same destination,
+          // or if the tied candidates all share the identical destination href (e.g. identical repo link):
+          const cleanTargetHref = descriptor.href ? getCleanHrefPath(descriptor.href) : '';
+          const getCandidateHref = (el: HTMLElement): string => {
+            const elHref =
+              el.getAttribute('href') ||
+              el.closest('a')?.getAttribute('href') ||
+              (el instanceof HTMLAnchorElement ? el.pathname : null);
+            return elHref ? getCleanHrefPath(elHref) : '';
+          };
+
+          let sameHrefCandidates: ScoredCandidate[] = [];
+          if (cleanTargetHref.length > 1) {
+            sameHrefCandidates = tiedCandidates.filter((c) => getCandidateHref(c.el) === cleanTargetHref);
+          } else {
+            // Check if tied candidates all share the same non-empty href
+            const firstHref = getCandidateHref(tiedCandidates[0].el);
+            if (firstHref.length > 1 && tiedCandidates.every((c) => getCandidateHref(c.el) === firstHref)) {
+              sameHrefCandidates = tiedCandidates;
+            }
+          }
+
+          if (sameHrefCandidates.length > 0) {
+            // All these candidates take the user to the exact same destination!
+            // Priority 1: Match descriptor.selector if available
+            const selectorMatch = descriptor.selector
+              ? sameHrefCandidates.find((c) => {
+                  try {
+                    return c.el.matches(descriptor.selector!);
+                  } catch {
+                    return false;
+                  }
+                })
+              : null;
+
+            // Priority 2: Container context text match
+            const containerMatch =
+              descriptor.containerText && descriptor.containerText.trim().length > 1
+                ? sameHrefCandidates.find((c) => {
+                    const container =
+                      c.el.closest(
+                        'tr, [role="row"], li, [role="listitem"], article, [data-card], .card, .panel, section, [role="region"], fieldset, form, [role="group"]'
+                      ) || c.el.parentElement;
+                    return container && normalize(container.textContent).includes(normalize(descriptor.containerText));
+                  })
+                : null;
+
+            // Priority 3: Primary document landmark (aside, main, nav) over search popovers / header overlays
+            const inPrimaryLandmark = sameHrefCandidates.find((c) => {
+              const inPrimary = !!c.el.closest(
+                'main, aside, nav, [role="main"], [role="navigation"], .dashboard-sidebar, .feed-left-sidebar'
+              );
+              const inOverlay = !!c.el.closest(
+                'dialog, [role="dialog"], [aria-modal="true"], header, [role="banner"], .modal, [class*="modal"], [id*="command-palette"], [class*="command-palette"], [class*="qbsearch"]'
+              );
+              return inPrimary && !inOverlay;
+            });
+
+            // Priority 4: In visible viewport with real layout geometry
+            const inViewport = sameHrefCandidates.find((c) => {
+              if (typeof c.el.getBoundingClientRect !== 'function') return false;
+              try {
+                const r = c.el.getBoundingClientRect();
+                return (
+                  r.width > 0 &&
+                  r.height > 0 &&
+                  r.top < window.innerHeight &&
+                  r.bottom > 0 &&
+                  r.left < window.innerWidth &&
+                  r.right > 0
+                );
+              } catch {
+                return false;
+              }
+            });
+
+            // Priority 5: Unobstructed hit test
+            const unobstructed = sameHrefCandidates.find((c) => {
+              const hit = TargetResolver.checkHitTarget(c.el);
+              return !hit.isObstructed;
+            });
+
+            const bestSameHref =
+              selectorMatch || containerMatch || inPrimaryLandmark || inViewport || unobstructed || sameHrefCandidates[0];
+            return this.buildFoundResult(bestSameHref, descriptor, mappedCandidates.size, hardConstraintRejections, second?.score);
+          }
+
+          // 2. Real Viewport & Geometry Disambiguation
+          // If one candidate is rendered in the visible viewport with nonzero dimensions while others are offscreen or 0x0
+          if (typeof window !== 'undefined' && typeof window.innerHeight === 'number' && window.innerHeight > 0) {
+            const inViewportCandidates = tiedCandidates.filter((c) => {
+              if (typeof c.el.getBoundingClientRect !== 'function') return false;
+              try {
+                const r = c.el.getBoundingClientRect();
+                return (
+                  r.width > 0 &&
+                  r.height > 0 &&
+                  r.top < window.innerHeight &&
+                  r.bottom > 0 &&
+                  r.left < window.innerWidth &&
+                  r.right > 0
+                );
+              } catch {
+                return false;
+              }
+            });
+
+            if (inViewportCandidates.length === 1) {
+              return this.buildFoundResult(inViewportCandidates[0], descriptor, mappedCandidates.size, hardConstraintRejections, second?.score);
+            }
+          }
+
+          // 3. Unobstructed Hit-Testing Disambiguation
+          // If one candidate passes hit testing (unobstructed) while others are obstructed:
+          const unobstructed = tiedCandidates.filter((c) => {
+            const hit = TargetResolver.checkHitTarget(c.el);
+            return !hit.isObstructed;
+          });
+          if (unobstructed.length === 1) {
+            return this.buildFoundResult(unobstructed[0], descriptor, mappedCandidates.size, hardConstraintRejections, second?.score);
+          }
+
+          // 4. CSS Selector Match Tie-Breaker
+          // If descriptor.selector was recorded, check which candidate matches it
+          if (descriptor.selector) {
+            const selectorMatches = tiedCandidates.filter((c) => {
+              try {
+                return c.el.matches(descriptor.selector!);
+              } catch {
+                return false;
+              }
+            });
+            if (selectorMatches.length === 1) {
+              return this.buildFoundResult(selectorMatches[0], descriptor, mappedCandidates.size, hardConstraintRejections, second?.score);
+            }
+          }
+
+          // 5. Container Context Disambiguation
+          // If descriptor.containerText was recorded, check container text
+          if (descriptor.containerText && descriptor.containerText.trim().length > 1) {
+            const containerNorm = normalize(descriptor.containerText);
+            const containerMatches = tiedCandidates.filter((c) => {
+              const container =
+                c.el.closest(
+                  'tr, [role="row"], li, [role="listitem"], article, [data-card], .card, .panel, section, [role="region"], fieldset, form, [role="group"]'
+                ) || c.el.parentElement;
+              return container && normalize(container.textContent).includes(containerNorm);
+            });
+            if (containerMatches.length === 1) {
+              return this.buildFoundResult(containerMatches[0], descriptor, mappedCandidates.size, hardConstraintRejections, second?.score);
+            }
+          }
+
+          // 6. Interactive Link & Target Text Affinity Tie-Breaker
+          // If a candidate is an anchor (or inside one) whose href contains the target's normalized text:
+          const targetNormText = normalize(descriptor.text);
+          if (targetNormText.length >= 3) {
+            const hrefMatches = tiedCandidates.filter((c) => {
+              const hrefPath = getCandidateHref(c.el);
+              if (!hrefPath) return false;
+              const cleanHref = normalize(hrefPath);
+              return cleanHref.includes(targetNormText) || targetNormText.includes(cleanHref);
+            });
+            if (hrefMatches.length >= 1) {
+              const bestMatch =
+                hrefMatches.find((c) => {
+                  return !!c.el.closest('main, aside, nav, [role="main"], [role="navigation"]');
+                }) || hrefMatches[0];
+              return this.buildFoundResult(bestMatch, descriptor, mappedCandidates.size, hardConstraintRejections, second?.score);
+            }
+          }
+
+          // 7. Interactive Element vs Static Wrapper Tie-Breaker
+          // Prefer real interactive elements (a, button, input) over static text wrappers (span, div)
+          const interactiveOnly = tiedCandidates.filter((c) => {
+            return (
+              c.el.matches('a, button, [role="button"], [role="link"], input, select, textarea') ||
+              !!c.el.closest('a, button, [role="button"], [role="link"]')
+            );
+          });
+          if (interactiveOnly.length === 1) {
+            return this.buildFoundResult(interactiveOnly[0], descriptor, mappedCandidates.size, hardConstraintRejections, second?.score);
+          }
+
+          // 8. Landmark / Main Document vs Header / Modal Overlay Tie-Breaker
+          // Navigation/content in aside/main/nav takes priority over search popovers, command palettes, and header overlays
+          const landmarkCandidates = tiedCandidates.filter((c) => {
+            const inPrimary = !!c.el.closest('main, aside, nav, [role="main"], [role="navigation"]');
+            const inOverlay = !!c.el.closest(
+              'dialog, [role="dialog"], [aria-modal="true"], header, [role="banner"], .modal, [class*="modal"], [id*="command-palette"], [class*="command-palette"], [class*="qbsearch"]'
+            );
+            return inPrimary && !inOverlay;
+          });
+          if (landmarkCandidates.length >= 1) {
+            return this.buildFoundResult(landmarkCandidates[0], descriptor, mappedCandidates.size, hardConstraintRejections, second?.score);
+          }
+
+          // 9. Specific Entity Safety Clause
+          // If the target is NOT a generic action button (e.g. "Delete", "Confirm", "Submit"),
+          // but a specific named entity (such as a repository name, user handle, file name, or title),
+          // duplicate matches represent references to the SAME logical entity! Disambiguate by selecting the top candidate
+          // rather than failing the user's workflow.
+          const isGenericActionText = (text: string | null | undefined): boolean => {
+            if (!text) return true;
+            const t = text.trim().toLowerCase();
+            return /^(delete|remove|destroy|trash|edit|modify|update|confirm|confirm order|submit|save|cancel|ok|yes|no|next|prev|previous|back|close|select|choose|add|buy|checkout|pay|order|apply|reset|clear|\+|\-|x|×|\.{3})$/i.test(
+              t
+            );
+          };
+
+          if (!isGenericActionText(descriptor.text)) {
+            return this.buildFoundResult(top, descriptor, mappedCandidates.size, hardConstraintRejections, second?.score);
+          }
+
+          // 10. Genuinely Ambiguous: multiple distinct, visible candidates with generic action labels
           const competingCandidates: CandidateInfo[] = tiedCandidates.slice(0, 5).map((c) => ({
             tag: c.el.tagName.toLowerCase(),
             id: c.el.id || undefined,
@@ -425,31 +643,41 @@ export class TargetResolver {
     }
 
     // 8. Winning Result Determination
+    return this.buildFoundResult(top, descriptor, mappedCandidates.size, hardConstraintRejections, second?.score);
+  }
+
+  private static buildFoundResult(
+    candidate: { el: HTMLElement; score: number; matchedAttributes: string[]; caveats: string[] },
+    _descriptor: TargetDescriptor,
+    totalCandidatesExamined?: number,
+    hardConstraintRejections?: number,
+    secondCandidateScore?: number
+  ): ResolutionResult {
     let confidence: 'high' | 'medium' | 'low' = 'low';
-    if (top.score >= 85) confidence = 'high';
-    else if (top.score >= 50) confidence = 'medium';
+    if (candidate.score >= 85) confidence = 'high';
+    else if (candidate.score >= 50) confidence = 'medium';
 
     let method: ResolutionMethod = 'multi_attribute_scoring';
-    if (top.matchedAttributes.includes('href')) method = 'exact_href';
-    else if (top.matchedAttributes.includes('text')) method = 'exact_text';
-    else if (top.matchedAttributes.includes('placeholder')) method = 'exact_placeholder';
-    else if (top.matchedAttributes.includes('containerText')) method = 'container_context';
-    else if (top.matchedAttributes.includes('selector')) method = 'css_selector';
+    if (candidate.matchedAttributes.includes('href')) method = 'exact_href';
+    else if (candidate.matchedAttributes.includes('text')) method = 'exact_text';
+    else if (candidate.matchedAttributes.includes('placeholder')) method = 'exact_placeholder';
+    else if (candidate.matchedAttributes.includes('containerText')) method = 'container_context';
+    else if (candidate.matchedAttributes.includes('selector')) method = 'css_selector';
 
     return {
       status: 'FOUND',
-      element: top.el,
-      score: top.score,
+      element: candidate.el,
+      score: candidate.score,
       confidence,
       method,
-      matchedAttributes: top.matchedAttributes,
-      caveats: top.caveats.length > 0 ? top.caveats : undefined,
+      matchedAttributes: candidate.matchedAttributes,
+      caveats: candidate.caveats.length > 0 ? candidate.caveats : undefined,
       diagnostics: {
-        totalCandidatesExamined: mappedCandidates.size,
+        totalCandidatesExamined,
         hardConstraintRejections,
-        topCandidateScore: top.score,
-        secondCandidateScore: second?.score,
-        contextMatched: top.matchedAttributes.includes('containerText'),
+        topCandidateScore: candidate.score,
+        secondCandidateScore,
+        contextMatched: candidate.matchedAttributes.includes('containerText'),
       },
     };
   }
@@ -711,16 +939,38 @@ export class TargetResolver {
   /**
    * Helper to check if an element is visually available (not display:none, opacity:0, or visibility:hidden)
    */
-  private static isElementVisuallyAvailable(el: Element): boolean {
+  public static isElementVisuallyAvailable(el: Element): boolean {
     if (!el || !el.isConnected) return false;
+
+    // Reject elements inside closed dialogs, closed details, hidden, or aria-hidden containers
+    if (el.closest && el.closest('dialog:not([open]), details:not([open]), [hidden], [aria-hidden="true"]')) {
+      return false;
+    }
+
     if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
       try {
         const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+        if (
+          style.display === 'none' ||
+          style.visibility === 'hidden' ||
+          style.opacity === '0' ||
+          style.clip === 'rect(0px, 0px, 0px, 0px)' ||
+          style.clipPath === 'inset(50%)'
+        ) {
           return false;
         }
       } catch {}
     }
+
+    if (typeof el.getBoundingClientRect === 'function') {
+      try {
+        const rect = el.getBoundingClientRect();
+        if (rect.right < 0 || rect.bottom < 0) {
+          return false;
+        }
+      } catch {}
+    }
+
     return true;
   }
 

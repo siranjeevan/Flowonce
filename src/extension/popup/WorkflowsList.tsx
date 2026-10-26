@@ -9,7 +9,9 @@ import type { User } from 'firebase/auth';
 
 export function WorkflowsList({ user, onOpenBuilder }: { user: User | null; onOpenBuilder?: (wf: Workflow) => void }) {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
   const [importId, setImportId] = useState('');
+  const [showImport, setShowImport] = useState(false);
   const [loading, setLoading] = useState(true);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [playingWorkflowId, setPlayingWorkflowId] = useState<string | null>(null);
@@ -537,6 +539,7 @@ export function WorkflowsList({ user, onOpenBuilder }: { user: User | null; onOp
         await FirestoreStorageManager.saveWorkflow(importedWf);
         alert('Workflow imported successfully!');
         setImportId('');
+        setShowImport(false);
         reloadWorkflows();
       } else {
         alert('Workflow not found. It may be private or invalid.');
@@ -549,131 +552,260 @@ export function WorkflowsList({ user, onOpenBuilder }: { user: User | null; onOp
     }
   };
 
+  const filteredWorkflows = workflows.filter((wf) => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase().trim();
+    return (
+      wf.name.toLowerCase().includes(q) ||
+      wf.steps.some(
+        (s) =>
+          (s.url && s.url.toLowerCase().includes(q)) ||
+          (s.target?.text && s.target.text.toLowerCase().includes(q))
+      )
+    );
+  });
+
   if (loading) return (
-    <div className="flex flex-col items-center justify-center py-10 space-y-3">
-      <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-      <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Loading your workflows...</p>
+    <div className="w-full flex flex-col space-y-2 pb-2 animate-in fade-in duration-200">
+      {/* Skeleton Action Bar */}
+      <div className="flex items-center gap-1.5">
+        <div className="flex-1 h-[30px] rounded-lg bg-[#0D1224] border border-white/5 skeleton-shimmer"></div>
+        <div className="w-16 h-[30px] rounded-lg bg-[#0D1224] border border-white/5 skeleton-shimmer"></div>
+        <div className="w-12 h-[30px] rounded-lg bg-[#0D1224] border border-white/5 skeleton-shimmer"></div>
+      </div>
+
+      {/* Skeleton Subheader */}
+      <div className="flex justify-between items-center py-1 border-b border-white/5">
+        <div className="flex items-center gap-2">
+          <div className="w-24 h-3.5 rounded bg-white/10 skeleton-shimmer"></div>
+          <div className="w-6 h-3.5 rounded-full bg-white/5 skeleton-shimmer"></div>
+        </div>
+        <div className="w-14 h-3.5 rounded bg-white/5 skeleton-shimmer"></div>
+      </div>
+
+      {/* Skeleton Cards List */}
+      <div className="space-y-2">
+        {[1, 2, 3].map((i) => (
+          <div
+            key={i}
+            className="rounded-xl p-2.5 bg-[#141A33]/70 border border-white/5 flex flex-col space-y-2 shadow-sm"
+          >
+            {/* Top row */}
+            <div className="flex items-start gap-2">
+              <div className="w-3.5 h-3.5 rounded bg-white/10 skeleton-shimmer mt-0.5 shrink-0"></div>
+              <div className="flex-1 space-y-1.5 min-w-0">
+                <div className={`h-3 rounded bg-white/10 skeleton-shimmer ${i === 1 ? 'w-3/4' : i === 2 ? 'w-2/3' : 'w-4/5'}`}></div>
+                <div className="flex items-center gap-1.5">
+                  <div className="w-12 h-2.5 rounded bg-[#F9DF9F]/10 skeleton-shimmer"></div>
+                  <div className="w-16 h-2.5 rounded bg-cyan-400/10 skeleton-shimmer"></div>
+                  <div className="w-10 h-2.5 rounded bg-white/5 skeleton-shimmer"></div>
+                </div>
+              </div>
+              <div className="w-4 h-4 rounded bg-white/5 skeleton-shimmer shrink-0"></div>
+            </div>
+
+            {/* Bottom action row */}
+            <div className="flex items-center justify-between gap-1.5 pt-1.5 border-t border-white/5">
+              <div className="flex items-center gap-1.5 flex-1">
+                <div className="flex-1 h-[30px] rounded-lg bg-[#F9DF9F]/15 skeleton-shimmer"></div>
+                <div className="w-14 h-[30px] rounded-lg bg-[#1A2242] skeleton-shimmer"></div>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-11 h-[30px] rounded-lg bg-white/5 skeleton-shimmer"></div>
+                <div className="w-[30px] h-[30px] rounded-lg bg-white/5 skeleton-shimmer"></div>
+                <div className="w-[30px] h-[30px] rounded-lg bg-rose-500/10 skeleton-shimmer"></div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 
   return (
-    <div className="w-full flex flex-col space-y-6 pb-2">
-      {/* Import Section */}
-      <div className="relative group">
-        <div className="absolute -inset-0.5 bg-gradient-to-r from-[#F9DF9F] to-[#e6cc8e] rounded-lg blur opacity-10 group-hover:opacity-30 transition duration-200"></div>
-        <div className="relative flex items-center bg-[#1A2240] rounded-lg shadow-sm border border-[#CDE4E6]/20 overflow-hidden focus-within:ring-2 focus-within:ring-[#F9DF9F]">
-          <div className="pl-3 text-[#CDE4E6]/50">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
-          </div>
+    <div className="w-full flex flex-col space-y-2 pb-2">
+      {/* Sleek Unified Toolbar: Search + Import Drawer Toggle + Speed Selector */}
+      <div className="flex items-center gap-1.5">
+        <div className="relative flex-1 flex items-center bg-[#0D1224] rounded-lg border border-white/10 px-2.5 h-[30px] focus-within:border-[#F9DF9F]/50 transition-all">
+          <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-[#CDE4E6]/40 shrink-0 mr-1.5">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={workflows.length > 0 ? `Search ${workflows.length} workflows...` : 'Search workflows...'}
+            className="w-full bg-transparent border-none text-[11px] text-[#CDE4E6] placeholder-[#CDE4E6]/40 focus:outline-none"
+          />
+          {searchQuery && (
+            <button onClick={() => setSearchQuery('')} className="text-[#CDE4E6]/40 hover:text-[#CDE4E6] text-xs ml-1 cursor-pointer">
+              ✕
+            </button>
+          )}
+        </div>
+
+        {/* Collapsible Import Drawer Toggle Button */}
+        <button
+          onClick={() => setShowImport(!showImport)}
+          className={`h-[30px] px-2.5 rounded-lg text-[10px] font-bold border transition-all flex items-center gap-1 cursor-pointer shrink-0 active:scale-95 ${
+            showImport
+              ? 'bg-[#F9DF9F]/20 text-[#F9DF9F] border-[#F9DF9F]/50 shadow-[0_0_8px_rgba(249,223,159,0.2)]'
+              : 'bg-[#0D1224] text-[#CDE4E6]/80 hover:text-[#F9DF9F] border-white/10 hover:border-white/20'
+          }`}
+          title="Import Workflow by ID"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>
+          </svg>
+          <span>Import</span>
+        </button>
+
+        {/* Replay Speed Selector */}
+        <select 
+          value={speed}
+          onChange={(e) => setSpeed(Number(e.target.value))}
+          className="h-[30px] bg-[#0D1224] text-[#F9DF9F] text-[10px] font-bold rounded-lg border border-white/10 px-1.5 outline-none focus:border-[#F9DF9F]/40 cursor-pointer shrink-0"
+          title="Replay Execution Speed"
+        >
+          <option value={0.5}>0.5x</option>
+          <option value={1}>1.0x</option>
+          <option value={2}>2.0x</option>
+          <option value={5}>5.0x</option>
+        </select>
+      </div>
+
+      {/* Collapsible Import Drawer */}
+      {showImport && (
+        <div className="relative p-2 rounded-xl bg-[#0D1224] border border-[#F9DF9F]/35 shadow-lg flex items-center gap-1.5 transition-all">
           <input 
             type="text" 
             value={importId}
             onChange={(e) => setImportId(e.target.value)}
-            placeholder="Paste Workflow ID to import..."
-            className="flex-1 px-3 py-2.5 text-sm bg-transparent border-none focus:outline-none text-[#CDE4E6] placeholder-[#CDE4E6]/40"
+            placeholder="Paste Workflow ID..."
+            className="flex-1 px-2.5 h-[28px] text-[11px] bg-[#141A33] rounded-lg border border-white/10 focus:border-[#F9DF9F]/50 focus:outline-none text-[#CDE4E6] placeholder-[#CDE4E6]/40 font-mono"
+            autoFocus
           />
           <button 
             onClick={handleImport}
             disabled={!importId.trim()}
-            className="px-4 py-2.5 bg-[#F9DF9F] hover:bg-[#e6cc8e] disabled:bg-[#1A2240] disabled:text-[#CDE4E6]/40 text-[#263056] text-sm font-bold transition-colors"
+            className="h-[28px] px-3 bg-gradient-to-r from-[#F9DF9F] to-[#E9C376] hover:brightness-105 disabled:opacity-40 disabled:hover:brightness-100 text-[#10152B] text-[11px] font-extrabold rounded-lg transition-all shadow-xs cursor-pointer shrink-0"
           >
             Import
           </button>
+          <button
+            onClick={() => setShowImport(false)}
+            className="text-[#CDE4E6]/40 hover:text-[#CDE4E6] p-1 text-xs cursor-pointer"
+            title="Cancel"
+          >
+            ✕
+          </button>
         </div>
-      </div>
-      
-      <div className="flex flex-col space-y-3">
-        <div className="flex justify-between items-end pb-1 border-b border-[#CDE4E6]/20">
-          <h3 className="font-bold text-[#F9DF9F] text-sm flex items-center gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#CDE4E6]"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-            Saved Workflows
-            <span className="bg-[#F9DF9F]/20 text-[#F9DF9F] py-0.5 px-2 rounded-full text-[10px]">{workflows.length}</span>
-          </h3>
+      )}
+
+      {/* Saved Workflows Subheader */}
+      <div className="flex flex-col space-y-2">
+        <div className="flex justify-between items-center py-0.5 border-b border-white/5">
+          <div className="flex items-center gap-1.5">
+            <span className="font-extrabold text-[#F9DF9F] text-xs">Saved Workflows</span>
+            <span className="bg-[#F9DF9F]/15 text-[#F9DF9F] text-[10px] font-mono px-2 py-0.2 rounded-full border border-[#F9DF9F]/20 font-bold">
+              {searchQuery ? `${filteredWorkflows.length}/${workflows.length}` : workflows.length}
+            </span>
+          </div>
           
           {workflows.length > 0 && (
-            <div className="flex items-center space-x-3">
-              <select 
-                value={speed}
-                onChange={(e) => setSpeed(Number(e.target.value))}
-                className="bg-[#1A2240] text-[#CDE4E6] text-[10px] rounded border border-[#CDE4E6]/20 py-0.5 px-1 outline-none focus:border-[#F9DF9F]"
-                title="Playback Speed"
-              >
-                <option value={0.5}>0.5x Speed</option>
-                <option value={1}>1x Speed</option>
-                <option value={2}>2x Speed</option>
-                <option value={5}>5x Fast</option>
-              </select>
-
-              <label className="flex items-center space-x-1.5 cursor-pointer text-xs text-[#CDE4E6]/70 hover:text-[#CDE4E6] transition-colors">
-                <input 
-                  type="checkbox" 
-                  checked={selectedIds.size === workflows.length && workflows.length > 0}
-                  onChange={toggleSelectAll}
-                  className="rounded border-[#CDE4E6]/30 bg-[#1A2240] text-[#F9DF9F] focus:ring-[#F9DF9F]"
-                />
-                <span className="font-medium">All</span>
-              </label>
+            <div className="flex items-center space-x-2">
               {selectedIds.size > 0 && (
                 <button 
                   onClick={deleteSelectedWorkflows}
-                  className="text-[10px] bg-red-500/20 hover:bg-red-500/40 text-red-400 px-2 py-1 rounded-md font-bold transition-all shadow-sm flex items-center gap-1"
+                  className="text-[10px] bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/30 px-2 py-0.5 rounded-md font-bold transition-all shadow-sm flex items-center gap-1 active:scale-95 cursor-pointer"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
                   Delete ({selectedIds.size})
                 </button>
               )}
+              <label className="flex items-center space-x-1 cursor-pointer text-[10px] text-[#CDE4E6]/70 hover:text-[#CDE4E6] transition-colors">
+                <input 
+                  type="checkbox" 
+                  checked={selectedIds.size === filteredWorkflows.length && filteredWorkflows.length > 0}
+                  onChange={toggleSelectAll}
+                  className="rounded border-white/20 bg-[#0D1224] text-[#F9DF9F] focus:ring-0 cursor-pointer w-3.5 h-3.5"
+                />
+                <span className="font-medium">Select All</span>
+              </label>
             </div>
           )}
         </div>
 
-        {workflows.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8 px-4 text-center border border-dashed border-[#CDE4E6]/20 rounded-xl bg-[#1A2240]/50">
-            <div className="w-12 h-12 bg-[#F9DF9F]/10 text-[#F9DF9F] rounded-full flex items-center justify-center mb-3">
-              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>
+        {filteredWorkflows.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-10 px-4 text-center border border-dashed border-white/10 rounded-xl bg-[#0D1224]/60">
+            <div className="w-10 h-10 bg-[#F9DF9F]/10 text-[#F9DF9F] rounded-full flex items-center justify-center mb-2.5">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>
             </div>
-            <p className="text-sm font-semibold text-[#CDE4E6]">No workflows yet</p>
-            <p className="text-xs text-[#CDE4E6]/60 mt-1 max-w-[200px]">Record your first workflow or import one to get started.</p>
+            <p className="text-xs font-bold text-[#F9DF9F]">
+              {searchQuery ? 'No matching workflows' : 'No workflows yet'}
+            </p>
+            <p className="text-[10px] text-[#CDE4E6]/60 mt-1 max-w-[220px] leading-relaxed">
+              {searchQuery
+                ? 'Try searching with a different name or clear the search query.'
+                : 'Click Record to record your first flow, or open Visual Builder to craft one.'}
+            </p>
           </div>
         ) : (
-          <div className="space-y-3">
-            {workflows.map(wf => (
-              <div 
-                key={wf.id} 
-                className={`group relative overflow-hidden rounded-xl p-3 border transition-all duration-200 ${
-                  selectedIds.has(wf.id) 
-                    ? 'bg-[#1A2240] border-[#F9DF9F] shadow-sm' 
-                    : 'bg-[#1A2240] border-[#CDE4E6]/10 shadow-sm hover:shadow-md hover:border-[#F9DF9F]/50'
-                }`}
-              >
-                {/* Active Indicator Line */}
-                <div className={`absolute left-0 top-0 bottom-0 w-1 transition-colors ${selectedIds.has(wf.id) ? 'bg-[#F9DF9F]' : 'bg-transparent group-hover:bg-[#F9DF9F]/50'}`}></div>
-                
-                <div className="flex justify-between items-start ml-2">
-                  <div className="flex items-start space-x-3">
-                    <input 
-                      type="checkbox"
-                      checked={selectedIds.has(wf.id)}
-                      onChange={() => toggleSelection(wf.id)}
-                      className="mt-1 rounded border-[#CDE4E6]/30 bg-[#263056] text-[#F9DF9F] focus:ring-[#F9DF9F] transition-colors"
-                    />
-                    <div className="flex flex-col cursor-pointer" onClick={() => setExpandedWorkflowId(expandedWorkflowId === wf.id ? null : wf.id)}>
-                      <span className="font-semibold text-sm text-[#F9DF9F] truncate max-w-[170px] hover:underline">{wf.name}</span>
-                      <div className="flex items-center text-[10px] text-[#CDE4E6]/60 mt-0.5 space-x-2">
-                        <span className="flex items-center bg-[#263056] px-1.5 py-0.5 rounded">
-                          <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-1"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-                          {wf.steps.length} steps
-                        </span>
-                        <span>{new Date(wf.createdAt).toLocaleDateString()}</span>
+          <div className="space-y-2.5">
+            {filteredWorkflows.map(wf => {
+              const firstUrl = wf.steps.find((s) => s.url)?.url;
+              let domain = '';
+              if (firstUrl) {
+                try {
+                  domain = new URL(firstUrl).hostname.replace('www.', '');
+                } catch {
+                  // Ignore invalid URL parse
+                }
+              }
+
+              return (
+                <div 
+                  key={wf.id} 
+                  className={`group relative overflow-hidden rounded-xl p-2.5 border transition-all duration-200 ${
+                    selectedIds.has(wf.id) 
+                      ? 'bg-[#141A33] border-[#F9DF9F] shadow-[0_0_15px_rgba(249,223,159,0.15)]' 
+                      : 'bg-[#141A33]/85 border-white/10 shadow-sm hover:shadow-md hover:border-[#F9DF9F]/40'
+                  }`}
+                >
+                  {/* Active Indicator Line */}
+                  <div className={`absolute left-0 top-0 bottom-0 w-1 transition-colors ${selectedIds.has(wf.id) ? 'bg-[#F9DF9F]' : 'bg-transparent group-hover:bg-[#F9DF9F]/40'}`}></div>
+                  
+                  <div className="flex justify-between items-start ml-1 gap-2">
+                    <div className="flex items-start gap-2 flex-1 min-w-0">
+                      <input 
+                        type="checkbox"
+                        checked={selectedIds.has(wf.id)}
+                        onChange={() => toggleSelection(wf.id)}
+                        className="mt-0.5 rounded border-white/20 bg-[#0D1224] text-[#F9DF9F] focus:ring-0 cursor-pointer shrink-0 w-3.5 h-3.5"
+                      />
+                      <div className="flex flex-col flex-1 min-w-0 cursor-pointer" onClick={() => setExpandedWorkflowId(expandedWorkflowId === wf.id ? null : wf.id)}>
+                        <span className="font-bold text-xs text-[#FFF3D1] group-hover:text-[#F9DF9F] truncate transition-colors" title={wf.name}>{wf.name}</span>
+                        <div className="flex flex-wrap items-center text-[10px] text-[#CDE4E6]/60 mt-1 gap-1.5">
+                          <span className="flex items-center bg-[#0D1224] text-[#F9DF9F] font-mono px-1.5 py-0.5 rounded text-[9px] border border-white/5 font-semibold shrink-0">
+                            ⚡ {wf.steps.length} {wf.steps.length === 1 ? 'step' : 'steps'}
+                          </span>
+                          {domain && (
+                            <span className="flex items-center bg-[#0D1224] text-cyan-300 font-mono px-1.5 py-0.5 rounded text-[9px] border border-cyan-500/20 truncate max-w-[120px] shrink-0" title={firstUrl}>
+                              🌐 {domain}
+                            </span>
+                          )}
+                          <span className="text-[9px] text-[#CDE4E6]/40 shrink-0">{new Date(wf.createdAt).toLocaleDateString()}</span>
+                        </div>
                       </div>
                     </div>
+                    <button 
+                      onClick={() => setExpandedWorkflowId(expandedWorkflowId === wf.id ? null : wf.id)}
+                      className="text-[#CDE4E6]/50 hover:text-[#CDE4E6] p-1 rounded-md hover:bg-white/5 transition-colors shrink-0"
+                      title={expandedWorkflowId === wf.id ? 'Collapse steps' : 'Expand steps'}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`transform transition-transform ${expandedWorkflowId === wf.id ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
                   </div>
-                  <button 
-                    onClick={() => setExpandedWorkflowId(expandedWorkflowId === wf.id ? null : wf.id)}
-                    className="text-[#CDE4E6]/50 hover:text-[#CDE4E6] p-1 rounded-md hover:bg-[#263056] transition-colors"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`transform transition-transform ${expandedWorkflowId === wf.id ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9"/></svg>
-                  </button>
-                </div>
 
                 {errorState?.id === wf.id && (
                   errorState.isRecoveryRequired ? (
@@ -986,61 +1118,69 @@ export function WorkflowsList({ user, onOpenBuilder }: { user: User | null; onOp
                   )
                 )}
 
-                <div className="flex space-x-2 mt-3 ml-8 mr-2">
-                  <button 
-                    onClick={() => playWorkflow(wf)}
-                    disabled={playingWorkflowId === wf.id}
-                    className="flex-1 flex items-center justify-center gap-1.5 bg-[#F9DF9F] hover:bg-[#e6cc8e] disabled:bg-[#F9DF9F]/60 text-[#263056] py-1.5 rounded-lg text-[10px] sm:text-xs font-bold transition-all shadow-sm hover:shadow active:scale-95"
-                  >
-                    {playingWorkflowId === wf.id ? (
-                      <>
-                        <svg className="animate-spin h-3 w-3 text-[#263056] shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        <span className="truncate max-w-[80px] sm:max-w-[120px]">
-                          {runningProgress 
-                            ? `[${runningProgress.index}/${runningProgress.total}] ${runningProgress.type}` 
-                            : 'Running...'}
-                        </span>
-                      </>
-                    ) : (
-                      <>
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                        Run
-                      </>
-                    )}
-                  </button>
-                  <button 
-                    onClick={() => onOpenBuilder?.(wf)}
-                    className="flex items-center justify-center gap-1 bg-[#263056] hover:bg-[#1A2240] text-[#F9DF9F] px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all active:scale-95 border border-[#F9DF9F]/30"
-                    title="Edit in Visual Workflow Builder"
-                  >
-                    🛠️ Build
-                  </button>
-                  <button 
-                    onClick={() => openDataModal(wf)}
-                    disabled={playingWorkflowId === wf.id}
-                    className="flex items-center justify-center gap-1 bg-[#263056] hover:bg-[#1A2240] text-[#CDE4E6] px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all active:scale-95 border border-[#CDE4E6]/20"
-                    title="Run with custom variables or dataset"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-                    Data
-                  </button>
-                  <button 
-                    onClick={() => shareWorkflow(wf.id)}
-                    className="flex-1 flex items-center justify-center gap-1.5 bg-[#263056] hover:bg-[#1A2240] text-[#CDE4E6] py-1.5 rounded-lg text-xs font-semibold transition-all active:scale-95 border border-[#CDE4E6]/20"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg>
-                    Share
-                  </button>
-                  <button 
-                    onClick={() => deleteWorkflow(wf.id)}
-                    className="w-8 flex items-center justify-center bg-[#263056] hover:bg-red-500/20 text-red-400 py-1.5 rounded-lg transition-colors active:scale-95 border border-red-500/20"
-                    title="Delete workflow"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-                  </button>
+                <div className="flex items-center justify-between gap-1.5 mt-2 pt-2 border-t border-white/5">
+                  {/* Primary Actions Group (Run & Build) */}
+                  <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                    <button 
+                      onClick={() => playWorkflow(wf)}
+                      disabled={playingWorkflowId === wf.id}
+                      className="flex-1 h-[30px] flex items-center justify-center gap-1.5 bg-gradient-to-r from-[#F9DF9F] via-[#F5D792] to-[#E9C376] hover:brightness-105 disabled:opacity-50 text-[#10152B] px-2.5 rounded-lg text-xs font-extrabold transition-all shadow-sm active:scale-95 cursor-pointer shrink-0"
+                    >
+                      {playingWorkflowId === wf.id ? (
+                        <>
+                          <svg className="animate-spin h-3 w-3 text-[#10152B] shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          <span className="truncate max-w-[70px]">
+                            {runningProgress 
+                              ? `[${runningProgress.index}/${runningProgress.total}]` 
+                              : 'Running...'}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" className="shrink-0"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                          <span>Run</span>
+                        </>
+                      )}
+                    </button>
+                    <button 
+                      onClick={() => onOpenBuilder?.(wf)}
+                      className="h-[30px] flex items-center justify-center gap-1 bg-[#1A2242] hover:bg-[#232D56] text-[#F9DF9F] hover:text-[#FFF0C2] px-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 border border-[#F9DF9F]/30 hover:border-[#F9DF9F]/60 shadow-xs cursor-pointer shrink-0"
+                      title="Edit in Visual Workflow Builder"
+                    >
+                      <span className="text-[11px]">🛠️</span>
+                      <span>Build</span>
+                    </button>
+                  </div>
+
+                  {/* Secondary Tools Group: Data, Share, Delete */}
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button 
+                      onClick={() => openDataModal(wf)}
+                      disabled={playingWorkflowId === wf.id}
+                      className="h-[30px] flex items-center justify-center gap-1 bg-[#0D1224] hover:bg-white/10 text-[#CDE4E6] px-2 rounded-lg text-[11px] font-semibold transition-all active:scale-95 border border-white/10 hover:border-white/20 cursor-pointer"
+                      title="Run with custom variables or dataset"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#CDE4E6]/70"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                      <span>Data</span>
+                    </button>
+                    <button 
+                      onClick={() => shareWorkflow(wf.id)}
+                      className="h-[30px] w-[30px] flex items-center justify-center bg-[#0D1224] hover:bg-white/10 text-[#CDE4E6] rounded-lg transition-all active:scale-95 border border-white/10 hover:border-white/20 cursor-pointer"
+                      title="Copy Workflow ID to share"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg>
+                    </button>
+                    <button 
+                      onClick={() => deleteWorkflow(wf.id)}
+                      className="h-[30px] w-[30px] flex items-center justify-center bg-[#0D1224] hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 rounded-lg transition-all active:scale-95 border border-rose-500/20 hover:border-rose-500/40 cursor-pointer"
+                      title="Delete workflow"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                    </button>
+                  </div>
                 </div>
 
                 {expandedWorkflowId === wf.id && (
@@ -1073,9 +1213,10 @@ export function WorkflowsList({ user, onOpenBuilder }: { user: User | null; onOp
                   </div>
                 )}
               </div>
-            ))}
-          </div>
-        )}
+            );
+          })}
+        </div>
+      )}
       </div>
 
       {/* Phase 7: Dataset & Runtime Variables Modal */}
