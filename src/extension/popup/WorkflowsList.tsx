@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { Workflow } from '../../shared/types/workflow';
 import { FirestoreStorageManager } from '../../workflow/storage/firestore-storage';
 import { WorkflowStorage } from '../../workflow/storage/WorkflowStorage';
+import { LEGACY_STORAGE_KEYS } from '../../workflow/storage/storage-keys';
 import { DatasetParser } from '../../replay/dataset/DatasetParser';
 import { classifyActionSafety } from '../../replay/ActionVerifier';
 import type { User } from 'firebase/auth';
@@ -408,15 +409,71 @@ export function WorkflowsList({ user, onOpenBuilder }: { user: User | null; onOp
     alert(`Workflow ID copied to clipboard: ${workflowId}\n\nShare this ID with anyone to let them import it!`);
   };
 
-  const deleteWorkflow = async (workflowId: string) => {
-    if (confirm('Are you sure you want to delete this workflow?')) {
-      setLoading(true);
+  const removeWorkflowFromAllStorages = async (workflowId: string) => {
+    // 1. Delete from canonical local storage
+    try {
+      await WorkflowStorage.deleteWorkflow(workflowId);
+    } catch (err) {
+      console.warn('[WorkflowsList] Failed to delete from canonical local storage:', err);
+    }
+
+    // 2. Filter out from legacy storage keys if present
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        const legacyData = await chrome.storage.local.get([
+          LEGACY_STORAGE_KEYS.LEGACY_WORKFLOWS,
+          LEGACY_STORAGE_KEYS.LEGACY_FLOWONCE_WORKFLOWS,
+        ]);
+        const updates: Record<string, unknown> = {};
+
+        if (Array.isArray(legacyData[LEGACY_STORAGE_KEYS.LEGACY_WORKFLOWS])) {
+          updates[LEGACY_STORAGE_KEYS.LEGACY_WORKFLOWS] = (
+            legacyData[LEGACY_STORAGE_KEYS.LEGACY_WORKFLOWS] as any[]
+          ).filter((w) => w && w.id !== workflowId);
+        }
+
+        if (Array.isArray(legacyData[LEGACY_STORAGE_KEYS.LEGACY_FLOWONCE_WORKFLOWS])) {
+          updates[LEGACY_STORAGE_KEYS.LEGACY_FLOWONCE_WORKFLOWS] = (
+            legacyData[LEGACY_STORAGE_KEYS.LEGACY_FLOWONCE_WORKFLOWS] as any[]
+          ).filter((w) => w && w.id !== workflowId);
+        }
+
+        if (Object.keys(updates).length > 0) {
+          await chrome.storage.local.set(updates);
+        }
+      }
+    } catch (err) {
+      console.warn('[WorkflowsList] Failed to delete from legacy storage:', err);
+    }
+
+    // 3. Delete from Firestore cloud if user is authenticated
+    if (user?.uid) {
       try {
         await FirestoreStorageManager.deleteWorkflow(workflowId);
+      } catch (err) {
+        console.warn('[WorkflowsList] Failed to delete from Firestore cloud:', err);
+      }
+    }
+  };
+
+  const deleteWorkflow = async (workflowId: string) => {
+    if (confirm('Are you sure you want to delete this workflow?')) {
+      // Optimistically remove from state so UI updates instantly
+      setWorkflows((prev) => prev.filter((w) => w.id !== workflowId));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(workflowId);
+        return next;
+      });
+
+      setLoading(true);
+      try {
+        await removeWorkflowFromAllStorages(workflowId);
         await reloadWorkflows();
       } catch (e) {
         console.error('Failed to delete workflow', e);
         alert('Failed to delete workflow.');
+      } finally {
         setLoading(false);
       }
     }
@@ -424,16 +481,21 @@ export function WorkflowsList({ user, onOpenBuilder }: { user: User | null; onOp
 
   const deleteSelectedWorkflows = async () => {
     if (selectedIds.size === 0) return;
-    if (confirm(`Are you sure you want to delete ${selectedIds.size} selected workflow(s)?`)) {
+    const count = selectedIds.size;
+    if (confirm(`Are you sure you want to delete ${count} selected workflow(s)?`)) {
+      const idsToDelete = Array.from(selectedIds);
+      // Optimistically remove all selected from UI state
+      setWorkflows((prev) => prev.filter((w) => !selectedIds.has(w.id)));
+      setSelectedIds(new Set());
+
       setLoading(true);
       try {
-        await Promise.all(
-          Array.from(selectedIds).map(id => FirestoreStorageManager.deleteWorkflow(id))
-        );
+        await Promise.all(idsToDelete.map((id) => removeWorkflowFromAllStorages(id)));
         await reloadWorkflows();
       } catch (e) {
         console.error('Failed to delete selected workflows', e);
         alert('Failed to delete some or all workflows.');
+      } finally {
         setLoading(false);
       }
     }

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import type { WorkflowStep, Workflow } from '../../shared/types/workflow';
 import { WorkflowStorage } from '../../workflow/storage/WorkflowStorage';
 import { FirestoreStorageManager } from '../../workflow/storage/firestore-storage';
+import { LEGACY_STORAGE_KEYS } from '../../workflow/storage/storage-keys';
 import { Auth } from './Auth';
 import { WorkflowsList } from './WorkflowsList';
 import { TemplatesView } from './TemplatesView';
@@ -123,8 +124,16 @@ function App() {
             const cloudWf = { ...wf, ownerId: user.uid };
             await FirestoreStorageManager.saveWorkflow(cloudWf);
           }
-          // Clear local after successful sync
+          // Clear local and legacy keys after successful sync
           await WorkflowStorage.replaceAllWorkflows([]);
+          try {
+            await chrome.storage.local.remove([
+              LEGACY_STORAGE_KEYS.LEGACY_WORKFLOWS,
+              LEGACY_STORAGE_KEYS.LEGACY_FLOWONCE_WORKFLOWS,
+            ]);
+          } catch {
+            // Ignore if keys do not exist or chrome.storage is unavailable
+          }
           showNotification(`Synced ${localWorkflows.length} offline workflow(s) to cloud!`, 'success');
         }
       } catch (err) {

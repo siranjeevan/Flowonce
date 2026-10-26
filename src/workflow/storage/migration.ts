@@ -351,6 +351,16 @@ export async function migrateLegacyStorage(force: boolean = false): Promise<Migr
       [STORAGE_KEYS.SCHEMA_VERSION]: CURRENT_SCHEMA_VERSION,
     });
 
+    // 10. Clean up legacy storage keys now that canonical storage is verified
+    try {
+      await chrome.storage.local.remove([
+        LEGACY_STORAGE_KEYS.LEGACY_WORKFLOWS,
+        LEGACY_STORAGE_KEYS.LEGACY_FLOWONCE_WORKFLOWS,
+      ]);
+    } catch (cleanupErr) {
+      console.warn('[Migration] Failed to clean up legacy storage keys:', cleanupErr);
+    }
+
     return {
       success: true,
       alreadyMigrated: false,
